@@ -77,9 +77,10 @@ artifact ledger.  Join on `record_id` if a combined view is needed.
 | F — Ledger | 23 |
 | G — Replay / Invalidation | 22 |
 | H — Adapter Contract | 25 |
-| **Total** | **85** |
+| Trust boundary | 26 |
+| **Total** | **111** |
 
-All 85 pass.
+All 111 pass.
 
 ---
 

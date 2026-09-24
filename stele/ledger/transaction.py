@@ -61,6 +61,10 @@ def ledger_transaction(
 
     Yields the ArtifactRecord in PENDING state so callers can inspect
     it (e.g. to pass record_id to a downstream adapter) before committing.
+
+    With duplicate_policy="ignore", a duplicate yields the existing record
+    unchanged: this transaction did not create it, so it neither commits nor
+    fails it, and exceptions from the block propagate untouched.
     """
     if not sandbox_result.succeeded:
         raise SandboxFailedError(
@@ -84,6 +88,11 @@ def ledger_transaction(
         source_hash=source_hash,
         duplicate_policy=duplicate_policy,
     )
+
+    if record.run_id != str(sandbox_result.run_id):
+        # Existing record returned by duplicate_policy="ignore" — not ours to finalize.
+        yield record
+        return
 
     try:
         yield record

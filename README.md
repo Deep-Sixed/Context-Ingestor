@@ -1,7 +1,7 @@
 # Stele — Parser Containment & Artifact Ledger
 
 **Status:** COMPLETE — v1.0 milestone (extracted 2026-06-26)  
-**Canonical repo:** `/mnt/jarvis-data/projects/Stele`  
+**Canonical repo:** `Deep-Sixed/Context-Ingestor`  
 **Created:** 2026-06-26
 
 ## Extraction note
@@ -30,10 +30,11 @@ Stele adapter contract (Phase H) and the Dispatcher write path.
 | Phase F — ledger | ✅ 23 tests |
 | Phase G — replay / invalidation | ✅ 22 tests |
 | Phase H — adapter contract | ✅ 25 tests |
+| Trust boundary (symlink / drift / non-regular output) | ✅ 26 tests |
 | Live ingestion (EVECOR RAG path) | ✅ proven |
 | Scoped tombstones (`{run_id}:` prefix) | ✅ implemented in EVECOR RAG integration |
 
-**85 Stele tests** in this repo. RAG×Stele integration tests (31) remain in
+**111 Stele tests** in this repo, run in CI with real bubblewrap. RAG×Stele integration tests (31) remain in
 `EVECOR/DataCore/RAG/` until adapters move with cutover.
 
 ## Gate
@@ -83,7 +84,6 @@ Stele/
 ## Develop
 
 ```bash
-cd /mnt/jarvis-data/projects/Stele
 uv sync --extra dev
-uv run pytest tests/ -v
+uv run pytest tests/ -v   # containment tests need bubblewrap (bwrap) on PATH
 ```

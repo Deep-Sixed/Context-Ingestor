@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor,
+          # which bwrap needs to build the sandbox.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / --unshare-pid --unshare-net --dev /dev --proc /proc true
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run tests
+        # shell: bash enables pipefail, so a test failure fails the step.
+        shell: bash
+        run: |
+          uv run pytest -v -rs | tee pytest.log
+          # The containment tests skip when bwrap is missing; in CI they must run.
+          if grep -q SKIPPED pytest.log; then echo "tests were skipped"; exit 1; fi

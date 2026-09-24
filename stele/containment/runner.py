@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from ..ledger.hashing import collect_artifacts
 from .result import SandboxResult
 from .sandbox import BubblewrapSandbox, SandboxConfig
 
@@ -32,9 +33,19 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
     """Execute config.command inside a bubblewrap sandbox and return the result.
 
     The sandbox exits (and all ephemeral writes are discarded) before this
-    function returns. Only files found in config.artifact_dir are captured
-    in the returned SandboxResult.
+    function returns. Only regular files found in config.artifact_dir are
+    captured in the returned SandboxResult; symlinks and other non-regular
+    entries are reported in rejected_paths and fail the run.
+
+    Raises ValueError if config.artifact_dir already has contents — leftover
+    files would otherwise be attributed to this run.
     """
+    if config.artifact_dir.exists() and any(config.artifact_dir.iterdir()):
+        raise ValueError(
+            f"artifact_dir {config.artifact_dir} is not empty — "
+            "each run needs a fresh output directory"
+        )
+
     run_id = uuid4()
     sandbox = BubblewrapSandbox()
     argv = sandbox.build_argv(config)
@@ -45,6 +56,7 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
     try:
         proc = subprocess.run(
             argv,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=config.timeout_seconds,
@@ -62,7 +74,7 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
 
     wall_time = time.monotonic() - t0
 
-    artifact_paths = sorted(p for p in config.artifact_dir.rglob("*") if p.is_file())
+    artifact_paths, rejected_paths = collect_artifacts(config.artifact_dir)
 
     return SandboxResult(
         run_id=run_id,
@@ -73,6 +85,7 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
         artifact_dir=config.artifact_dir,
         wall_time_seconds=wall_time,
         timed_out=timed_out,
+        rejected_paths=rejected_paths,
     )
 
 
@@ -132,11 +145,12 @@ def _main() -> None:
         "timed_out": result.timed_out,
         "wall_time_seconds": round(result.wall_time_seconds, 3),
         "artifact_paths": [str(p) for p in result.artifact_paths],
+        "rejected_paths": [str(p) for p in result.rejected_paths],
         "stdout": result.stdout,
         "stderr": result.stderr,
     }, indent=2))
 
-    sys.exit(result.exit_code)
+    sys.exit(result.exit_code if result.exit_code != 0 or result.succeeded else 1)
 
 
 if __name__ == "__main__":

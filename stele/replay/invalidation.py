@@ -71,18 +71,20 @@ def auto_invalidate_drifted(
 
     Convenience wrapper: after plan_replay() detects drift or missing files,
     call this to bulk-invalidate those records so they are excluded from
-    subsequent replay passes.
+    subsequent replay passes.  Candidates that are already INVALIDATED (from
+    plan_replay(include_invalidated=True)) are skipped rather than aborting
+    the batch partway through.
     """
+    from ..ledger.models import ArtifactState
+
     invalidated: list[ArtifactRecord] = []
     for candidate in plan_candidates:
-        if not candidate.is_replayable:
-            reason = (
-                InvalidationReason.DRIFT_DETECTED
-                if candidate.validation.status in ("drift", "missing")
-                else InvalidationReason.MANUAL
+        if candidate.is_replayable or candidate.record.state is ArtifactState.INVALIDATED:
+            continue
+        full_note = f"{note}: {candidate.validation.drift_summary}"
+        invalidated.append(
+            invalidate_record(
+                store, candidate.record.record_id, InvalidationReason.DRIFT_DETECTED, note=full_note
             )
-            full_note = f"{note}: {candidate.validation.drift_summary}"
-            invalidated.append(
-                invalidate_record(store, candidate.record.record_id, reason, note=full_note)
-            )
+        )
     return invalidated

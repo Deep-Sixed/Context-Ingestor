@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .hashing import build_manifest, sha256_file, sha256_manifest
+from .hashing import UnsafeArtifactError, build_manifest, resolve_artifact, sha256_file, sha256_manifest
 from .models import ArtifactRecord, ArtifactState
 
 
@@ -50,6 +50,10 @@ class InvalidStateTransitionError(Exception):
 
 class MissingArtifactError(Exception):
     """Raised when an artifact file is absent at commit time."""
+
+
+class ArtifactDriftError(Exception):
+    """Raised when an artifact file no longer matches its recorded hash at commit time."""
 
 
 def _now_iso() -> str:
@@ -161,8 +165,11 @@ class LedgerStore:
     def commit(self, record_id: str) -> ArtifactRecord:
         """Transition PENDING → COMMITTED.
 
-        Verifies that all artifact files are still present on disk before
-        committing.  Raises InvalidStateTransitionError if the record is
+        Re-hashes every artifact file and compares it to the manifest recorded
+        at create_pending time, so what gets committed is exactly what was
+        hashed.  Raises MissingArtifactError if a file is gone,
+        ArtifactDriftError if a file changed or was replaced by a symlink or
+        non-regular file, and InvalidStateTransitionError if the record is
         not in PENDING state.
         """
         record = self._require(record_id)
@@ -173,14 +180,26 @@ class LedgerStore:
                 f"(must be 'pending')"
             )
 
-        # Re-verify files exist — guards against race where artifact_dir is
-        # cleaned up between create_pending and commit.
+        # Re-verify every file — guards against the artifact_dir being cleaned
+        # up or modified between create_pending and commit.
         artifact_dir = Path(record.artifact_dir)
-        for rel_path in record.artifact_manifest:
-            full = artifact_dir / rel_path
-            if not full.exists():
+        for rel_path, expected_hash in record.artifact_manifest.items():
+            try:
+                full = resolve_artifact(artifact_dir, rel_path)
+                actual_hash = sha256_file(full)
+            except FileNotFoundError:
                 raise MissingArtifactError(
-                    f"artifact file missing at commit time: {full} — "
+                    f"artifact file missing at commit time: {artifact_dir / rel_path} — "
+                    "cannot commit; call fail() instead"
+                )
+            except UnsafeArtifactError as exc:
+                raise ArtifactDriftError(
+                    f"artifact file unsafe at commit time: {exc} — "
+                    "cannot commit; call fail() instead"
+                )
+            if actual_hash != expected_hash:
+                raise ArtifactDriftError(
+                    f"artifact file changed since it was hashed: {full} — "
                     "cannot commit; call fail() instead"
                 )
 

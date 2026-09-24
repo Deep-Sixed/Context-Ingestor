@@ -7,7 +7,7 @@ from uuid import UUID
 
 @dataclass
 class SandboxResult:
-    """Immutable record of a single sandboxed parser run."""
+    """Record of a single sandboxed parser run."""
 
     run_id: UUID
     exit_code: int
@@ -20,10 +20,14 @@ class SandboxResult:
     artifact_dir: Path
     wall_time_seconds: float
     timed_out: bool = False
+    # Host-side paths the parser left in artifact_dir that are not regular
+    # files (symlinks, FIFOs, sockets, devices).  They are never hashed or
+    # followed, and any entry here means the run did not succeed.
+    rejected_paths: list[Path] = field(default_factory=list)
 
     @property
     def succeeded(self) -> bool:
-        return self.exit_code == 0 and not self.timed_out
+        return self.exit_code == 0 and not self.timed_out and not self.rejected_paths
 
     @property
     def produced_artifacts(self) -> bool:

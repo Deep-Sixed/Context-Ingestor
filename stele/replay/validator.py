@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..ledger.hashing import sha256_file
+from ..ledger.hashing import UnsafeArtifactError, resolve_artifact, sha256_file
 from ..ledger.models import ArtifactRecord
 from .models import ValidationResult
 
@@ -25,20 +25,24 @@ def validate_artifact(record: ArtifactRecord) -> ValidationResult:
       "missing" — one or more files are absent from artifact_dir
 
     Missing takes priority over drift: if any file is absent the status is
-    "missing" regardless of whether other files drifted.
+    "missing" regardless of whether other files drifted.  A file replaced by
+    a symlink or non-regular file counts as drift; it is never followed.
     """
     artifact_dir = Path(record.artifact_dir)
     drifted: list[str] = []
     missing: list[str] = []
 
     for rel_path, expected_hash in record.artifact_manifest.items():
-        full = artifact_dir / rel_path
-        if not full.exists():
+        try:
+            actual_hash = sha256_file(resolve_artifact(artifact_dir, rel_path))
+        except FileNotFoundError:
             missing.append(rel_path)
-        else:
-            actual_hash = sha256_file(full)
-            if actual_hash != expected_hash:
-                drifted.append(rel_path)
+            continue
+        except UnsafeArtifactError:
+            drifted.append(rel_path)
+            continue
+        if actual_hash != expected_hash:
+            drifted.append(rel_path)
 
     if missing:
         status = "missing"

@@ -9,12 +9,17 @@ These four tests prove the four required properties:
   PASS 4 — Sandbox failure / ephemeral writes do not produce committed artifacts.
 
 Run with:
-    cd EVECOR/services/stele
     uv run pytest tests/test_phase_e_containment.py -v
+
+Requires bubblewrap (bwrap) on PATH; the module is skipped otherwise.  The
+interpreter used inside the sandbox must live under /usr (the only host tree
+bound into the sandbox) — override with STELE_TEST_PYTHON.
 """
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -23,7 +28,13 @@ from stele.containment.runner import run_in_sandbox
 from stele.containment.sandbox import SandboxConfig
 
 FIXTURES = Path(__file__).parent / "fixtures"
-PYTHON = "/usr/bin/python3.14"
+# Resolved on the host: /usr/bin/python3 is often a symlink through
+# /etc/alternatives, and /etc is not mounted inside the sandbox.
+PYTHON = os.path.realpath(os.environ.get("STELE_TEST_PYTHON", "/usr/bin/python3"))
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("bwrap") is None, reason="bubblewrap (bwrap) is not installed"
+)
 
 
 def _config(script: str, artifact_dir: Path, **kwargs) -> SandboxConfig:
