@@ -38,7 +38,16 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
     The sandbox exits (and all ephemeral writes are discarded) before this
     function returns. Only files found in config.artifact_dir are captured
     in the returned SandboxResult.
+
+    Raises ValueError if config.artifact_dir already has contents: leftover
+    files would otherwise be credited to this run.
     """
+    if config.artifact_dir.exists() and any(config.artifact_dir.iterdir()):
+        raise ValueError(
+            f"artifact_dir {config.artifact_dir} is not empty — "
+            "each run needs a fresh output directory"
+        )
+
     run_id = uuid4()
     sandbox = BubblewrapSandbox()
     runtime_config = config
@@ -64,6 +73,7 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
         try:
             proc = subprocess.run(
                 argv,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=runtime_config.timeout_seconds,

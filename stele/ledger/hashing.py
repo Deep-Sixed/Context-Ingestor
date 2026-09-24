@@ -18,7 +18,10 @@ def _nofollow_flags(*, directory: bool = False) -> int:
     if nofollow is None:
         raise UnsafeFileError("secure artifact hashing requires O_NOFOLLOW")
 
-    flags = os.O_RDONLY | nofollow
+    # O_NONBLOCK: opening a FIFO for reading otherwise blocks until a writer
+    # appears, so a parser-planted FIFO would hang hashing forever. It has no
+    # effect on reads from regular files, and the fstat check rejects FIFOs.
+    flags = os.O_RDONLY | nofollow | os.O_NONBLOCK
     if directory:
         directory_flag = getattr(os, "O_DIRECTORY", None)
         if directory_flag is None:
