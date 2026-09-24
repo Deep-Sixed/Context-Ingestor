@@ -26,14 +26,14 @@ Stele adapter contract (Phase H) and the Dispatcher write path.
 
 | Item | Status |
 |------|--------|
-| Phase E — containment | ✅ 15 tests |
-| Phase F — ledger | ✅ 23 tests |
-| Phase G — replay / invalidation | ✅ 22 tests |
+| Phase E — containment | ✅ 23 tests |
+| Phase F — ledger | ✅ 27 tests |
+| Phase G — replay / invalidation | ✅ 24 tests |
 | Phase H — adapter contract | ✅ 25 tests |
 | Live ingestion (EVECOR RAG path) | ✅ proven |
 | Scoped tombstones (`{run_id}:` prefix) | ✅ implemented in EVECOR RAG integration |
 
-**85 Stele tests** in this repo. RAG×Stele integration tests (31) remain in
+**99 Stele tests** in this repo. RAG×Stele integration tests (31) remain in
 `EVECOR/DataCore/RAG/` until adapters move with cutover.
 
 ## Gate

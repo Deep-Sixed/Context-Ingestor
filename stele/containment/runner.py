@@ -6,7 +6,7 @@ Usage as a library:
     from stele.containment.sandbox import SandboxConfig
 
     result = run_in_sandbox(SandboxConfig(
-        command=["/usr/bin/python3.14", "/stele/parser"],
+        command=["/usr/bin/python3", "/stele/parser"],
         artifact_dir=Path("/tmp/stele-run-xyz"),
         script_path=Path("/path/to/my_parser.py"),
     ))
@@ -15,17 +15,21 @@ Usage as a CLI:
     python -m stele.containment.runner \\
         --artifact-dir /tmp/stele-out \\
         --script /path/to/parser.py \\
-        -- /usr/bin/python3.14 /stele/parser
+        -- /usr/bin/python3 /stele/parser
 """
 from __future__ import annotations
 
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from .result import SandboxResult
+from .artifacts import collect_artifact_paths
 from .sandbox import BubblewrapSandbox, SandboxConfig
+from .staging import stage_regular_file
 
 
 def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
@@ -37,32 +41,50 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
     """
     run_id = uuid4()
     sandbox = BubblewrapSandbox()
-    argv = sandbox.build_argv(config)
-
-    t0 = time.monotonic()
-    timed_out = False
+    runtime_config = config
+    staging: TemporaryDirectory[str] | None = None
 
     try:
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=config.timeout_seconds,
-        )
-        exit_code = proc.returncode
-        stdout = proc.stdout
-        stderr = proc.stderr
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        exit_code = -1
-        raw_out = exc.stdout or b""
-        raw_err = exc.stderr or b""
-        stdout = raw_out.decode("utf-8", errors="replace") if isinstance(raw_out, bytes) else raw_out
-        stderr = raw_err.decode("utf-8", errors="replace") if isinstance(raw_err, bytes) else raw_err
+        # Never bind an untrusted source path directly into the sandbox. Stage a
+        # private regular-file copy first; stage_regular_file hashes exactly the
+        # descriptor it copies from and refuses symlinks and non-regular files.
+        if config.input_path is not None:
+            staging = TemporaryDirectory(prefix=f"stele-{run_id}-")
+            staged = stage_regular_file(
+                config.input_path,
+                Path(staging.name) / "input",
+            )
+            runtime_config = replace(config, input_path=staged.staged_path)
 
-    wall_time = time.monotonic() - t0
+        argv = sandbox.build_argv(runtime_config)
 
-    artifact_paths = sorted(p for p in config.artifact_dir.rglob("*") if p.is_file())
+        t0 = time.monotonic()
+        timed_out = False
+
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=runtime_config.timeout_seconds,
+            )
+            exit_code = proc.returncode
+            stdout = proc.stdout
+            stderr = proc.stderr
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            exit_code = -1
+            raw_out = exc.stdout or b""
+            raw_err = exc.stderr or b""
+            stdout = raw_out.decode("utf-8", errors="replace") if isinstance(raw_out, bytes) else raw_out
+            stderr = raw_err.decode("utf-8", errors="replace") if isinstance(raw_err, bytes) else raw_err
+
+        wall_time = time.monotonic() - t0
+    finally:
+        if staging is not None:
+            staging.cleanup()
+
+    artifact_paths = collect_artifact_paths(config.artifact_dir)
 
     return SandboxResult(
         run_id=run_id,

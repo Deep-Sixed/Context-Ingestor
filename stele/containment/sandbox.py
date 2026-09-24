@@ -28,18 +28,19 @@ _EPHEMERAL_TMPFS = ["/home", "/mnt", "/root", "/run", "/var"]
 class SandboxConfig:
     """Everything needed to construct and run one sandboxed parser invocation."""
 
-    # The command to execute inside the sandbox, e.g. ["/usr/bin/python3.14", "/stele/parser"].
+    # The command to execute inside the sandbox, e.g. ["/usr/bin/python3", "/stele/parser"].
     command: list[str]
 
     # Host-side directory that will be bind-mounted read-write at /stele/output.
     # Must exist before calling run_in_sandbox; runner creates it automatically.
     artifact_dir: Path
 
-    # Optional read-only input file or directory exposed at /stele/input.
+    # Optional read-only regular input file exposed at /stele/input.
+    # run_in_sandbox stages it into a private Stele-owned directory first.
     input_path: Path | None = None
 
     # Optional parser script exposed at /stele/parser (read-only).
-    # Useful when the command is ["/usr/bin/python3.14", "/stele/parser"].
+    # Useful when the command is ["/usr/bin/python3", "/stele/parser"].
     script_path: Path | None = None
 
     # Additional (src, sandbox_dest) read-only bind mounts, e.g. for venvs or
@@ -98,6 +99,9 @@ class BubblewrapSandbox:
 
         # --- Namespace isolation ---
         argv += [
+            "--unshare-user",  # gain capabilities only inside a private user namespace
+            "--uid", "0",
+            "--gid", "0",
             "--unshare-net",   # no network
             "--unshare-pid",   # isolated PID namespace
             "--unshare-uts",   # isolated hostname

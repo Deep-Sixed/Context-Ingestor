@@ -15,6 +15,8 @@ Run with:
 from __future__ import annotations
 
 import json
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,7 +25,11 @@ from stele.containment.runner import run_in_sandbox
 from stele.containment.sandbox import SandboxConfig
 
 FIXTURES = Path(__file__).parent / "fixtures"
-PYTHON = "/usr/bin/python3.14"
+PYTHON = str(Path(sys.executable).resolve())
+requires_bwrap = pytest.mark.skipif(
+    sys.platform != "linux" or shutil.which("bwrap") is None,
+    reason="live containment proof requires Linux bubblewrap",
+)
 
 
 def _config(script: str, artifact_dir: Path, **kwargs) -> SandboxConfig:
@@ -39,6 +45,7 @@ def _config(script: str, artifact_dir: Path, **kwargs) -> SandboxConfig:
 # PASS 1 — Allowed artifact emitted
 # ---------------------------------------------------------------------------
 
+@requires_bwrap
 class TestAllowedArtifact:
     """Parser runs inside bubblewrap and its output reaches the host via artifact_dir."""
 
@@ -77,6 +84,7 @@ class TestAllowedArtifact:
 # PASS 2 — Forbidden writes blocked
 # ---------------------------------------------------------------------------
 
+@requires_bwrap
 class TestForbiddenWrites:
     """Parser cannot write outside /stele/output — attempts raise OSError inside sandbox."""
 
@@ -127,9 +135,29 @@ class TestForbiddenWrites:
 
 
 # ---------------------------------------------------------------------------
+# NETWORK — isolated namespace exposes no host network interfaces
+# ---------------------------------------------------------------------------
+
+@requires_bwrap
+class TestNetworkIsolation:
+
+    def test_only_loopback_interface_visible(self, tmp_path: Path) -> None:
+        config = SandboxConfig(
+            command=[PYTHON, "/stele/parser"],
+            artifact_dir=tmp_path / "artifacts",
+            script_path=FIXTURES / "parser_network_namespace.py",
+        )
+        result = run_in_sandbox(config)
+
+        assert result.exit_code == 0, result.stderr
+        assert "network namespace isolated" in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # PASS 3 — Exit status, stdout, stderr captured
 # ---------------------------------------------------------------------------
 
+@requires_bwrap
 class TestExitStatusCapture:
     """Exit code, stdout, and stderr are faithfully captured regardless of value."""
 
@@ -169,6 +197,7 @@ class TestExitStatusCapture:
 # PASS 4 — No durable write path reachable from parser
 # ---------------------------------------------------------------------------
 
+@requires_bwrap
 class TestNoDurableWriteOutsideArtifactDir:
     """
     A parser that writes ONLY to /tmp (ephemeral sandbox tmpfs) must leave

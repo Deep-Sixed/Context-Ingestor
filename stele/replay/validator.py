@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..ledger.hashing import sha256_file
+from ..ledger.hashing import UnsafeFileError, sha256_file_beneath
 from ..ledger.models import ArtifactRecord
 from .models import ValidationResult
 
@@ -32,13 +32,17 @@ def validate_artifact(record: ArtifactRecord) -> ValidationResult:
     missing: list[str] = []
 
     for rel_path, expected_hash in record.artifact_manifest.items():
-        full = artifact_dir / rel_path
-        if not full.exists():
+        try:
+            actual_hash = sha256_file_beneath(artifact_dir, Path(rel_path))
+        except FileNotFoundError:
             missing.append(rel_path)
-        else:
-            actual_hash = sha256_file(full)
-            if actual_hash != expected_hash:
-                drifted.append(rel_path)
+            continue
+        except UnsafeFileError:
+            drifted.append(rel_path)
+            continue
+
+        if actual_hash != expected_hash:
+            drifted.append(rel_path)
 
     if missing:
         status = "missing"

@@ -166,6 +166,48 @@ class TestDriftDetection:
         assert not result.is_replayable
         assert "result.json" in result.drifted_files
 
+    def test_symlinked_artifact_is_drift_not_followed(
+        self, store: LedgerStore, artifact_dir: Path, tmp_path: Path
+    ) -> None:
+        p = _write(artifact_dir, "result.json", "original")
+        record = store.create_pending(
+            run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
+        )
+        store.commit(record.record_id)
+        committed = store.get(record.record_id)
+
+        outside = tmp_path / "outside.txt"
+        outside.write_text("host content")
+        p.unlink()
+        p.symlink_to(outside)
+
+        result = validate_artifact(committed)
+        assert result.status == "drift"
+        assert "result.json" in result.drifted_files
+
+    def test_symlinked_parent_directory_is_drift_not_followed(
+        self, store: LedgerStore, artifact_dir: Path, tmp_path: Path
+    ) -> None:
+        nested = artifact_dir / "nested"
+        nested.mkdir()
+        p = _write(nested, "result.json", "original")
+        record = store.create_pending(
+            run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
+        )
+        store.commit(record.record_id)
+        committed = store.get(record.record_id)
+
+        p.unlink()
+        nested.rmdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "result.json").write_text("host content")
+        nested.symlink_to(outside, target_is_directory=True)
+
+        result = validate_artifact(committed)
+        assert result.status == "drift"
+        assert "nested/result.json" in result.drifted_files
+
     def test_drifted_artifact_appears_in_plan_drifted(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
