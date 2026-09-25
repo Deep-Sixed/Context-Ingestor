@@ -69,7 +69,7 @@ ledger.
 ```
 Stele/
 ├── README.md
-├── docs/                   ← phase specs (E–H), evidence store (archive.md)
+├── docs/                   ← phase specs (E–H), evidence store (archive.md), cloud sandbox design note
 ├── stele/                  ← Python package
 │   ├── containment/
 │   ├── archive/            ← content-addressed evidence store (#16)
