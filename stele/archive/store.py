@@ -408,6 +408,16 @@ class BlobStore:
         in the store when it was recorded. Recording it again is a no-op.
         """
         self._check_snapshot_content(snapshot)
+        return self._record_snapshot(snapshot)
+
+    def _record_snapshot(self, snapshot: Snapshot) -> Snapshot:
+        """Publish a Snapshot record whose content the caller has just verified.
+
+        For stele.archive.ingest only: it stores every blob with
+        expected_digest (which hashes new bytes as they are written and
+        re-verifies a copy already stored), so hashing them all again in
+        put_snapshot would only double the cost of ingesting an input.
+        """
         final = self._sharded(self._snapshots / snapshot.kind.value, snapshot.digest)
         self._install_record(final, snapshot.to_canonical())
         return snapshot

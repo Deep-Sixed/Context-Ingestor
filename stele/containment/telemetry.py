@@ -32,6 +32,7 @@ class FailureReason(str, enum.Enum):
     ENGINE_ERROR = "engine_error"        # the sandbox could not start the parser (container
                                          # engine errors 125-127, Wasm load/link failure)
     UNSAFE_ARTIFACT = "unsafe_artifact"  # output held a symlink, FIFO, device or unreadable dir
+    OUTPUT_LIMIT = "output_limit"        # output exceeded max_output_bytes / max_output_files
 
 
 @dataclass(frozen=True)

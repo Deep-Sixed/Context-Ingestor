@@ -26,7 +26,12 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from .artifacts import UnsafeArtifactError, collect_artifact_paths, discard_artifact_dir_contents
+from .artifacts import (
+    OutputLimitError,
+    UnsafeArtifactError,
+    collect_artifact_paths,
+    discard_artifact_dir_contents,
+)
 from .backend import (
     BWRAP_MISSING as _BWRAP_MISSING,
     ExecutionOutcome,
@@ -156,9 +161,15 @@ def run_in_sandbox(
     artifact_paths: list[Path] = []
     if failure is None:
         try:
-            artifact_paths = collect_artifact_paths(config.artifact_dir)
+            artifact_paths = collect_artifact_paths(
+                config.artifact_dir,
+                max_bytes=config.max_output_bytes,
+                max_files=config.max_output_files,
+            )
         except UnsafeArtifactError as exc:
             failure = RunFailure(FailureReason.UNSAFE_ARTIFACT, str(exc), exit_code=outcome.exit_code)
+        except OutputLimitError as exc:
+            failure = RunFailure(FailureReason.OUTPUT_LIMIT, str(exc), exit_code=outcome.exit_code)
     if failure is not None:
         artifact_paths = []
         _remove_output(config.artifact_dir, created_artifact_dir)

@@ -71,7 +71,7 @@ Records are serialized as canonical JSON: sorted keys, compact separators, UTF-8
 {"locator":"/corpus/doc.pdf","schema":"stele.source","schema_version":1}
 ```
 
-A Snapshot record contains only fields derived from the content. It is published only after every blob it covers has been re-hashed (the file, or the tree object and each file it lists), so its presence means the Snapshot was complete and intact in the store when it was recorded. A stored blob corrupted to other bytes of the same length is refused, not certified.
+A Snapshot record contains only fields derived from the content. It is published only after every blob it covers has been re-hashed (the file, or the tree object and each file it lists), so its presence means the Snapshot was complete and intact in the store when it was recorded. A stored blob corrupted to other bytes of the same length is refused, not certified. Ingesting a staged input verifies each blob as it is stored (new bytes are hashed while written, and a copy already stored is re-hashed), so `snapshot_staged_input` publishes the record without hashing the input a second time.
 
 A Source's `source_id` is the SHA-256 of its canonical record. Linking a Source to its Snapshots is a per-run fact: each ledger record stores its run's Snapshot digest (`source_hash`) and `source_id` (see [ledger.md](ledger.md)).
 

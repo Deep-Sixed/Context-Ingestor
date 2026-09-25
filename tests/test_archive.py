@@ -569,6 +569,33 @@ class TestSnapshots:
         assert store.get_snapshot(f.digest, "file").kind is SnapshotKind.FILE
         assert store.get_snapshot(d.digest, "tree").kind is SnapshotKind.TREE
 
+    def test_ingest_hashes_the_input_once(
+        self, store: BlobStore, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Storing each blob with expected_digest already verifies it, so the
+        # snapshot is published without put_snapshot's second full re-hash.
+        def second_pass(snapshot):
+            raise AssertionError("the input was hashed a second time")
+
+        monkeypatch.setattr(store, "_check_snapshot_content", second_pass)
+        src = tmp_path / "corpus"
+        _tree(src)
+        snap = snapshot_staged_input(store, stage_input(src, tmp_path / "stage"))
+        assert store.get_snapshot(snap.digest, SnapshotKind.TREE) == snap
+        with pytest.raises(AssertionError, match="second time"):
+            store.put_snapshot(snap)  # the public entry point still re-hashes
+
+    def test_ingest_still_refuses_a_corrupt_stored_copy(
+        self, store: BlobStore, tmp_path: Path
+    ) -> None:
+        src = tmp_path / "doc.txt"
+        src.write_bytes(b"AAAA")
+        digest = store.put_bytes(b"AAAA")
+        overwrite(blob_file(store, digest), b"BBBB")  # same size, other bytes
+        with pytest.raises(IntegrityError, match="corrupt"):
+            snapshot_staged_input(store, stage_input(src, tmp_path / "stage"))
+        assert not store.has_snapshot(digest, SnapshotKind.FILE)
+
     def test_snapshot_refuses_bytes_that_differ_from_staging(
         self, store: BlobStore, tmp_path: Path
     ) -> None:

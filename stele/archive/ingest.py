@@ -48,7 +48,10 @@ def snapshot_staged_input(store: BlobStore, staged: StagedInput) -> Snapshot:
         raise IntegrityError(
             f"snapshot digest {snapshot.digest} differs from staged hash {staged.sha256}"
         )
-    return store.put_snapshot(snapshot)
+    # Every blob above was stored with expected_digest (and the tree object
+    # was just written from its bytes), so the content is already verified:
+    # publish the record without hashing the whole input a second time.
+    return store._record_snapshot(snapshot)
 
 
 def ingest_artifacts(

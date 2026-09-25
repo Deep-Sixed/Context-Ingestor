@@ -125,6 +125,14 @@ as the entrypoint of the image, so it must resolve inside the image (e.g.
   If the Stele process is killed, a running Docker container is not stopped
   (Podman gets `--timeout` as a backstop).
 
+**What a run leaves in `/stele/output` is limited too.** When the output is
+collected, before anything is stored in the archive, a run whose regular
+files total more than `SandboxConfig.max_output_bytes` (default 4 GiB) or
+number more than `max_output_files` (default 100,000) fails with
+`FailureReason.OUTPUT_LIMIT`, and its output is removed. While the parser
+runs, its writes are bounded only by the host filesystem that holds
+`artifact_dir`; put that directory on a volume sized for the parsers you run.
+
 **Parser output is captured within a fixed size.** Whatever a parser prints
 is buffered in the Stele process, outside every limit the sandbox puts on the
 parser (a container's memory limit does not cover the engine CLI relaying its

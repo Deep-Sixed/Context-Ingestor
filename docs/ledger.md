@@ -70,7 +70,7 @@ A second record for the same `run_id` raises `DuplicateRunError`.
 | `parser` | `ParserIdentity`: `name`, `version`, and the executable's digest: `image_digest` (OCI backend) or `module_sha256` (Wasm backends). The digests are measured by the run, not asserted by the caller. |
 | `parser_config` | The configuration passed to the parser, stored as canonical JSON |
 | `backend` | Sandbox backend that ran the parser |
-| `run_conditions` | `RunConditions`: the `device` (`cpu` or `gpu`) and the `memory`, `cpus`, `pids_limit` and `timeout_seconds` the run executed under. Recorded by Stele's runner (`record_parser_run`), so a replay runs the parser the same way (#30). `None` for runs recorded without them and for records made before schema version 5. |
+| `run_conditions` | `RunConditions`: the `device` (`cpu` or `gpu`) and the `memory`, `cpus`, `pids_limit` and `timeout_seconds` the run executed under. Recorded by Stele's runner (`record_parser_run`), so a replay runs the parser the same way (#30). Every stated condition must match the limits the backend reported applying (`SandboxResult.telemetry.limits`); a mismatch, or a condition the backend does not report, raises `ProvenanceError` and nothing is recorded. `None` for runs recorded without them and for records made before schema version 5. |
 | `artifact_dir` | Host path of the run's output directory (a location, not evidence) |
 | `artifact_manifest` | `{relative POSIX path: sha256}` for every artifact |
 | `artifact_hash` | Digest of the bundle's tree object in the archive (`sha256_manifest(manifest)`) |

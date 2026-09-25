@@ -11,6 +11,10 @@ class UnsafeArtifactError(ValueError):
     """Raised when parser output contains a symlink or non-regular entry."""
 
 
+class OutputLimitError(ValueError):
+    """Raised when parser output exceeds the run's size or file-count limit."""
+
+
 def _lstat(path: Path) -> os.stat_result:
     # A directory that is listable but not searchable (e.g. chmod 0444) lets
     # os.walk see names whose lstat then fails; treat that like unreadable.
@@ -23,12 +27,19 @@ def _lstat(path: Path) -> os.stat_result:
         ) from exc
 
 
-def collect_artifact_paths(artifact_dir: Path) -> list[Path]:
+def collect_artifact_paths(
+    artifact_dir: Path,
+    *,
+    max_bytes: int | None = None,
+    max_files: int | None = None,
+) -> list[Path]:
     """Return regular files under artifact_dir without following symlinks.
 
     The parser controls everything created below artifact_dir, so every entry is
     checked with lstat after the sandbox exits. Symlinks, devices, FIFOs,
-    sockets, and any non-directory/non-regular entry fail closed.
+    sockets, and any non-directory/non-regular entry fail closed. Output over
+    max_bytes in total or max_files files raises OutputLimitError, before
+    any of it is read.
     """
     artifact_dir = Path(artifact_dir)
 
@@ -49,6 +60,7 @@ def collect_artifact_paths(artifact_dir: Path) -> list[Path]:
         ) from exc
 
     artifacts: list[Path] = []
+    total = 0
     for root, dirnames, filenames in os.walk(
         artifact_dir, onerror=_unreadable, followlinks=False
     ):
@@ -70,6 +82,11 @@ def collect_artifact_paths(artifact_dir: Path) -> list[Path]:
                     f"unsafe artifact file entry (symlink/non-regular): {path}"
                 )
             artifacts.append(path)
+            total += entry.st_size
+            if max_files is not None and len(artifacts) > max_files:
+                raise OutputLimitError(f"the parser wrote more than {max_files} files")
+            if max_bytes is not None and total > max_bytes:
+                raise OutputLimitError(f"the parser wrote more than {max_bytes} bytes of output")
 
     return sorted(artifacts, key=lambda path: str(path.relative_to(artifact_dir)))
 
