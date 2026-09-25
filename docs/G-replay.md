@@ -73,7 +73,7 @@ Four named outcomes, never merged into each other:
 | `REPRODUCED` | Byte-identical output from a deterministic replay. Only parsers whose spec requires a `DETERMINISTIC` backend (Wasm, #7) can produce it. |
 | `EQUIVALENT` | Accepted under the parser's comparison policy. **Not** proof of reproduction, and never reported as `REPRODUCED`, even when the bytes happen to match. |
 | `DIVERGED` | Outside policy. For a parser without a policy, any byte difference. A replay run that fails is also `DIVERGED`. |
-| `UNREPLAYABLE` | The parser cannot be run as recorded: no parser identity (a migrated pre-#12 record), no spec in the catalog, a missing or different Wasm module or image, a missing input Snapshot, no capable backend, or a non-deterministic parser with no comparison policy. |
+| `UNREPLAYABLE` | The parser cannot be run as recorded: no parser identity (a migrated pre-#12 record), no spec in the catalog, a missing or different Wasm module or image, a missing input Snapshot, a record the spec cannot build a run from (e.g. no original file name for a parser that reads by suffix), no capable backend, or a non-deterministic parser with no comparison policy. |
 
 `DIVERGED` feeds invalidation: `invalidate_diverged(dispatcher, results)`
 invalidates each diverged record through the Dispatcher, which also removes
@@ -106,8 +106,9 @@ each carry `ML_REPLAY_POLICY`:
 - `device` ignored in `stele-parser.json`;
 - text must match exactly.
 
-`stele.parsers.replay.record_parser_run()` records a packaged-parser run in
-the ledger. `replay_spec(parser)` replays it on the CPU image through the same
+`stele.parsers.replay.record_parser_run(ledger, run, source=...)` records a
+packaged-parser run in the ledger; the Source is required so the replay can
+give the document its original name (the parsers pick their reader by suffix). `replay_spec(parser)` replays it on the CPU image through the same
 command and configuration environment as `run_parser()`. The parser-images
 workflow replays a real document through each built image and expects
 `EQUIVALENT`.

@@ -26,10 +26,12 @@ from ..replay.parsers import ParserSpec
 from . import CONFIG_ENV, ParserImage, ParserRun, _backend, thread_env
 
 
-def record_parser_run(
-    ledger: LedgerStore, run: ParserRun, *, source: Source | None = None
-) -> ArtifactRecord:
-    """Record and seal a successful packaged-parser run."""
+def record_parser_run(ledger: LedgerStore, run: ParserRun, *, source: Source) -> ArtifactRecord:
+    """Record and seal a successful packaged-parser run.
+
+    source is required: packaged parsers choose their reader by the input's
+    file suffix, so a replay needs the original name (Source.from_path(doc)).
+    """
     return record_run(
         ledger,
         run.result,
@@ -54,6 +56,11 @@ def replay_spec(
     def build(input_path: Path | None, artifact_dir: Path, config: Mapping[str, Any]) -> SandboxConfig:
         if input_path is None:
             raise ValueError(f"{parser.name} needs an input document")
+        if parser.formats and input_path.suffix.lower() not in parser.formats:
+            raise ValueError(
+                f"{parser.name} does not accept {input_path.name!r}; the record's "
+                "Source must carry the document's original file name"
+            )
         env = {
             **thread_env(parser.cpus),
             CONFIG_ENV: canonical_json(dict(config)).decode("utf-8"),

@@ -37,6 +37,7 @@ from stele.containment.backend import (
 )
 from stele.containment.oci import DEFAULT_OCI_IMAGE, OciBackend
 from stele.ledger.models import ParserIdentity as ParserIdentityRecord
+from stele.ledger.transaction import record_run
 from stele.parsers import (
     CONFIG_ENV,
     ParserImage,
@@ -462,6 +463,31 @@ class TestReplay:
         result = replay_record(ledger, ParserCatalog([spec]), record)
         assert result.outcome is ReplayOutcome.UNREPLAYABLE
         assert result.replay_run_id is None
+
+    def test_a_record_without_the_document_name_is_unreplayable(
+        self, doc: Path, tmp_path: Path
+    ) -> None:
+        """The replay input is named after the record's Source; a parser that
+        picks its reader by suffix cannot run under a generic name."""
+        ledger = open_ledger(tmp_path / "ledger.db")
+        files = self._files(self.LAYOUT)
+        run = run_parser(self.POLICY_PARSER, doc, tmp_path / "out", store=ledger.archive,
+                         backend=FakeBackend(write=files))
+        record = record_run(
+            ledger, run.result, parser=ParserIdentityRecord("fake", "1.0"),
+            parser_config=dict(run.identity.config),
+        )
+        result, backend = self._replay(ledger, record, files)
+        assert result.outcome is ReplayOutcome.UNREPLAYABLE
+        assert "original file name" in result.reason
+        assert backend.seen is None and result.replay_run_id is None
+
+    def test_record_parser_run_requires_the_source(self, doc: Path, tmp_path: Path) -> None:
+        ledger = open_ledger(tmp_path / "ledger.db")
+        run = run_parser(self.POLICY_PARSER, doc, tmp_path / "out", store=ledger.archive,
+                         backend=FakeBackend())
+        with pytest.raises(TypeError):
+            record_parser_run(ledger, run)
 
     def test_a_parser_without_a_policy_is_unreplayable(self, doc: Path, tmp_path: Path) -> None:
         ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))

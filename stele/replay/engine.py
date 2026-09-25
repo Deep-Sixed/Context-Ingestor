@@ -245,6 +245,13 @@ class _Replay:
         record = self.record
         input_path = self._input(work)
         try:
+            # Building the config is pure; doing it first turns a record the
+            # spec cannot run as recorded (e.g. an input name the parser does
+            # not accept) into UNREPLAYABLE instead of a failed run.
+            try:
+                spec.build_config(input_path, work / "output", record.parser_config or {})
+            except (ValueError, TypeError, KeyError) as exc:
+                raise _Unreplayable(f"cannot run the parser as recorded: {exc}") from exc
             run = run_parser(
                 spec,
                 artifact_dir=work / "output",

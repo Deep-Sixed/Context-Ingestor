@@ -197,6 +197,7 @@ def test_time_limit_is_a_clean_failure(name: str, tmp_path: Path) -> None:
 def test_replay_is_equivalent_never_reproduced(name: str, tmp_path: Path) -> None:
     """Roadmap #14: a real ML parser replayed on its recorded Snapshot, with its
     recorded config and image, lands within its comparison policy."""
+    from stele.archive import Source
     from stele.ledger.store import LedgerStore
     from stele.parsers.replay import record_parser_run, replay_spec
     from stele.replay.engine import ReplayOutcome, replay_record
@@ -208,7 +209,7 @@ def test_replay_is_equivalent_never_reproduced(name: str, tmp_path: Path) -> Non
     run = run_parser(parser, DOCS / doc, tmp_path / "out", store=ledger.archive,
                      backend=_cpu_backend(name))
     assert run.succeeded, f"{run.failure}\n--- stderr ---\n{run.result.stderr[-4000:]}"
-    record = record_parser_run(ledger, run)
+    record = record_parser_run(ledger, run, source=Source.from_path(DOCS / doc))
 
     spec = replay_spec(parser, backend=_cpu_backend(name))
     result = replay_record(ledger, ParserCatalog([spec]), record)
