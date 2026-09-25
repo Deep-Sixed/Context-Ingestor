@@ -30,6 +30,21 @@ import pytest
 from stele.containment import backend as backend_module
 from stele.containment.oci import OciBackend
 
+
+def pytest_configure(config) -> None:
+    # Match requires-python in pyproject.toml. An interpreter outside the
+    # project venv (e.g. a globally installed pytest) otherwise fails with
+    # misleading errors deep in the code, such as rmtree() rejecting onexc on
+    # Python 3.11.
+    if sys.version_info < (3, 12):
+        pytest.exit(
+            f"Stele requires Python >= 3.12, but pytest is running on "
+            f"{sys.version.split()[0]} ({sys.executable}). "
+            "Run `uv sync --extra dev`, then `uv run pytest`.",
+            returncode=4,
+        )
+
+
 _REGISTERED = backend_module.default_backends()
 _PROVED = [
     b for b in [
