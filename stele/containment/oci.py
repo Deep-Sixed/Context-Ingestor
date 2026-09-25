@@ -45,6 +45,13 @@ from .sandbox import (
     SANDBOX_SCRIPT,
     SandboxConfig,
 )
+from .telemetry import (
+    FailureReason,
+    RunFailure,
+    exit_status_failure,
+    signal_failure,
+    timeout_failure,
+)
 
 # Official Python image, pinned by (multi-arch index) digest. The containment
 # fixtures are Python scripts; real parsers bring their own pinned image.
@@ -467,21 +474,83 @@ class OciBackend(SandboxBackend):
                     "still be running and writing to the output directory, which must "
                     "not be used"
                 )
-            return ExecutionOutcome(
-                exit_code=-1,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                wall_time_seconds=time.monotonic() - t0,
-                timed_out=True,
-                image_digest=self.image_digest,
+            return self._outcome(
+                -1, proc.stdout, proc.stderr, time.monotonic() - t0,
+                engine, timeout, timed_out=True,
             )
-        return ExecutionOutcome(
-            exit_code=proc.returncode,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
-            wall_time_seconds=time.monotonic() - t0,
-            image_digest=self.image_digest,
+        return self._outcome(
+            proc.returncode, proc.stdout, proc.stderr, time.monotonic() - t0, engine, timeout,
         )
+
+    def _outcome(
+        self, exit_code: int, stdout: str, stderr: str, wall: float, engine: str,
+        timeout: int, *, timed_out: bool = False,
+    ) -> ExecutionOutcome:
+        return ExecutionOutcome(
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            wall_time_seconds=wall,
+            timed_out=timed_out,
+            image_digest=self.image_digest,
+            # The container runs with --rm, so the engine's CPU and memory
+            # accounting is gone when it exits: not measurable here.
+            runtime=f"{Path(engine).name}/{self.runtime}",
+            limits={
+                "timeout_seconds": timeout,
+                "memory": self.memory,
+                "cpus": self.cpus,
+                "pids": self.pids_limit,
+                "tmpfs": self.tmpfs_size,
+                "gpu": self.gpu,
+                "output_bytes": self.output_limit_bytes,
+            },
+            failure=self._classify(exit_code, stderr, wall, timeout, timed_out),
+        )
+
+    def _classify(
+        self, exit_code: int, stderr: str, wall: float, timeout: int, timed_out: bool
+    ) -> RunFailure | None:
+        if timed_out:
+            return timeout_failure(timeout, exit_code, "the container was force-removed")
+        if exit_code == 0:
+            return None
+        if exit_code == _SIGKILL_EXIT and wall >= timeout - 0.5:
+            # Podman's conmon enforces the same deadline with SIGKILL and can
+            # get there first.
+            return timeout_failure(timeout, exit_code, "the engine killed the container")
+        if exit_code == _SIGKILL_EXIT:
+            # Inside a memory-limited container, SIGKILL is the kernel's OOM
+            # killer (or gVisor's) at the cgroup limit.
+            return RunFailure(
+                FailureReason.OUT_OF_MEMORY,
+                f"killed by SIGKILL at the {self.memory} container memory limit",
+                exit_code=exit_code, signal=9,
+            )
+        if exit_code in _ENGINE_ERRORS:
+            last = _last_line(stderr)
+            return RunFailure(
+                FailureReason.ENGINE_ERROR,
+                _ENGINE_ERRORS[exit_code] + (f": {last}" if last else ""),
+                exit_code=exit_code,
+            )
+        if 128 < exit_code <= 128 + 64:
+            return signal_failure(exit_code - 128, exit_code)
+        return exit_status_failure(exit_code)
+
+
+# docker/podman run exit statuses that mean the engine, not the parser, failed.
+_ENGINE_ERRORS = {
+    125: "the container engine could not run the container",
+    126: "the parser command could not be executed in the image",
+    127: "the parser command was not found in the image",
+}
+_SIGKILL_EXIT = 128 + 9
+
+
+def _last_line(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1][:300] if lines else ""
 
 
 class _RootHandoff:
@@ -600,7 +669,7 @@ def _force_remove(engine: str, container_name: str) -> str | None:
                 timeout=_PROBE_TIMEOUT,
             )
             problem = (
-                f"{engine} rm exited {rm.returncode}: {_last_line(rm.stderr)}"
+                f"{engine} rm exited {rm.returncode}: {_tail(rm.stderr)}"
                 if rm.returncode != 0 else "removal reported success"
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -628,9 +697,9 @@ def _container_absent(engine: str, container_name: str) -> tuple[bool, str]:
         return False, "the container still exists"
     if "no such" in (proc.stderr or "").lower():
         return True, ""
-    return False, f"{engine} container inspect exited {proc.returncode}: {_last_line(proc.stderr)}"
+    return False, f"{engine} container inspect exited {proc.returncode}: {_tail(proc.stderr)}"
 
 
-def _last_line(text: str | None) -> str:
+def _tail(text: str | None) -> str:
     lines = (text or "").strip().splitlines()
     return lines[-1] if lines else "no output"

@@ -23,7 +23,7 @@ refused before its writer is called (append_intent, backed by a trigger).
 Each write attempt has its own attempt_id, carried by its intent and by its
 receipt or failure, so attempts that overlap (two dispatchers delivering the
 same record to the same target) are told apart: one attempt's receipt never
-closes another's intent. Events written before ledger schema 7 have no
+closes another's intent. Events written before ledger schema 8 have no
 attempt_id and are read as one attempt at a time, as they were written.
 
 A crash at any point therefore leaves a log that bounds what the target
@@ -43,6 +43,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..archive.records import canonical_json
+from .events import append_event, write_transaction
 from .store import LedgerStore, connect
 
 WRITE_EVENTS = ("intent", "receipt", "failure")
@@ -71,7 +72,7 @@ class DeliveryEvent:
     error: str | None
     at: datetime
     # The write attempt an intent, receipt or failure belongs to; None for
-    # removal events and for events written before ledger schema 7.
+    # removal events and for events written before ledger schema 8.
     attempt_id: str | None = None
 
 
@@ -135,7 +136,7 @@ class Delivery:
         after the removal.
 
         Attempts are matched by attempt_id, so one attempt's outcome never
-        closes another's intent. Events from before schema 7 carry none and
+        closes another's intent. Events from before schema 8 carry none and
         are read in order, one attempt at a time.
         """
         written = False
@@ -247,11 +248,17 @@ class DeliveryLog:
     def open_delivery(self, record_id: str, target: Any) -> str:
         """dispatch_id of record_id's delivery to target, created if new."""
         kind, encoded = encode_target(target)
-        self._conn.execute(
-            "INSERT OR IGNORE INTO deliveries "
-            "(dispatch_id, record_id, target_kind, target, created_at) VALUES (?,?,?,?,?)",
-            (str(uuid4()), record_id, kind, encoded, _now()),
-        )
+        dispatch_id = str(uuid4())
+        with write_transaction(self._conn):
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO deliveries "
+                "(dispatch_id, record_id, target_kind, target, created_at) VALUES (?,?,?,?,?)",
+                (dispatch_id, record_id, kind, encoded, _now()),
+            )
+            if cur.rowcount == 1:
+                append_event(self._conn, "delivery.opened", dispatch_id, {
+                    "record_id": record_id, "target_kind": kind, "target": encoded,
+                })
         row = self._conn.execute(
             "SELECT dispatch_id FROM deliveries "
             "WHERE record_id=? AND target_kind=? AND target=?",
@@ -270,19 +277,31 @@ class DeliveryLog:
         error: str | None = None,
         attempt_id: str | None = None,
     ) -> None:
-        """Durably append one event (committed before this returns).
+        """Durably append one event (committed, with its chain event, before this returns).
 
         A receipt or failure passes the attempt_id its intent was given.
         """
         try:
-            self._conn.execute(
-                "INSERT INTO delivery_events "
-                "(dispatch_id, event, planned, chunks_digest, done, error, at, attempt_id) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (dispatch_id, event, planned, chunks_digest, done, error, _now(), attempt_id),
-            )
+            with write_transaction(self._conn):
+                self._insert(dispatch_id, event, planned, chunks_digest, done, error, attempt_id)
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"cannot record {event!r} for {dispatch_id}: {exc}") from exc
+
+    def _insert(
+        self, dispatch_id: str, event: str, planned: int | None, chunks_digest: str | None,
+        done: int | None, error: str | None, attempt_id: str | None,
+    ) -> None:
+        """Insert one delivery event and its chain event (inside a write transaction)."""
+        self._conn.execute(
+            "INSERT INTO delivery_events "
+            "(dispatch_id, event, planned, chunks_digest, done, error, at, attempt_id) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (dispatch_id, event, planned, chunks_digest, done, error, _now(), attempt_id),
+        )
+        append_event(self._conn, "delivery.event", dispatch_id, {
+            "event": event, "planned": planned, "chunks_digest": chunks_digest,
+            "done": done, "error": error, "attempt_id": attempt_id,
+        })
 
     def append_intent(self, dispatch_id: str, chunks: list[Any]) -> str:
         """Durably record the intent to write chunks; return its attempt_id.
@@ -295,8 +314,7 @@ class DeliveryLog:
         The attempt's receipt or failure must carry the returned attempt_id.
         """
         attempt_id = str(uuid4())
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
+        with write_transaction(self._conn):
             first = self._conn.execute(
                 "SELECT planned, chunks_digest FROM delivery_events "
                 "WHERE dispatch_id=? AND event='intent' ORDER BY event_id LIMIT 1",
@@ -312,18 +330,9 @@ class DeliveryLog:
                     "chunks presented now; adapters must be deterministic"
                 )
             try:
-                self._conn.execute(
-                    "INSERT INTO delivery_events "
-                    "(dispatch_id, event, planned, chunks_digest, done, error, at, attempt_id) "
-                    "VALUES (?,'intent',?,?,NULL,NULL,?,?)",
-                    (dispatch_id, len(chunks), digest, _now(), attempt_id),
-                )
+                self._insert(dispatch_id, "intent", len(chunks), digest, None, None, attempt_id)
             except sqlite3.IntegrityError as exc:  # the payload-binding trigger
                 raise PayloadConflictError(f"delivery {dispatch_id}: {exc}") from exc
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
         return attempt_id
 
     def append_unwritten_failure(self, dispatch_id: str, error: str) -> None:

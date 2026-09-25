@@ -588,6 +588,7 @@ def test_catalog_refuses_duplicates() -> None:
 def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     """Roadmap #30: records made before run conditions were recorded keep
     NULL, and new records store them."""
+    from stele.ledger.events import verify_ledger
     from stele.ledger.models import RunConditions
 
     db = tmp_path / "ledger.db"
@@ -595,9 +596,12 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     record = _record(ledger, _probe_spec(), _probe_input(tmp_path), tmp_path)
     ledger.close()
     conn = sqlite3.connect(db)
+    for name in ("events_append_only_u", "events_append_only_d"):
+        conn.execute(f"DROP TRIGGER {name}")
+    conn.execute("DROP TABLE events")  # a v4 ledger has no event log (v7) either
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")
     conn.execute("DROP TRIGGER delivery_events_one_payload")  # added in v6
-    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added in v7
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added in v8
     conn.execute("PRAGMA user_version = 4")
     conn.commit()
     conn.close()
@@ -607,9 +611,19 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     assert migrated.run_conditions is None
     assert migrated.state is record.state and migrated.artifact_hash == record.artifact_hash
     assert ledger.find_by_parser(record.parser.name, device="cpu") == []
+    assert verify_ledger(ledger).ok  # the migrated record was imported into the chain
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
+    # The chain commits to run conditions: changing them by hand is detected.
+    conn.execute(
+        "UPDATE artifact_records SET run_conditions=? WHERE record_id=?",
+        ('{"device":"gpu"}', record.record_id),
+    )
+    conn.commit()
     conn.close()
+    report = verify_ledger(ledger)
+    assert not report.ok
+    assert any("run_conditions" in problem for problem in report.problems)
     assert RunConditions.from_dict(RunConditions(device="gpu", cpus=2).to_dict()).cpus == 2.0
     with pytest.raises(ValueError):
         RunConditions(device="tpu")
@@ -621,12 +635,14 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     db = tmp_path / "ledger.db"
     open_ledger(db).close()
     conn = sqlite3.connect(db)
-    conn.execute("DROP TRIGGER replays_append_only_u")
-    conn.execute("DROP TRIGGER replays_append_only_d")
+    for name in ("replays_append_only_u", "replays_append_only_d",
+                 "events_append_only_u", "events_append_only_d"):
+        conn.execute(f"DROP TRIGGER {name}")
     conn.execute("DROP TABLE replays")
+    conn.execute("DROP TABLE events")
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")  # added in v5
     conn.execute("DROP TRIGGER delivery_events_one_payload")  # added by version 6
-    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added by version 7
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added by version 8
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -634,5 +650,5 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     ledger = open_ledger(db)
     assert ReplayLog(ledger).all() == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     conn.close()

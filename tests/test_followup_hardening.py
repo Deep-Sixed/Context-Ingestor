@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from stele.containment.result import SandboxResult
+import stele.containment.backend as backend_module
 import stele.containment.runner as runner_module
 from stele.containment.runner import run_in_sandbox
 from stele.containment.sandbox import BubblewrapSandbox, SandboxConfig
@@ -152,21 +153,13 @@ class TestSessionIsolation:
         assert "--unshare-cgroup-try" in argv
         assert argv.index("--new-session") < argv.index("--")
 
-    def test_runner_gives_parser_no_stdin(self, tmp_path: Path, monkeypatch) -> None:
-        seen: dict[str, object] = {}
-
-        class Started(Exception):
-            pass
-
-        def fake_popen(argv, **kwargs):
-            seen.update(kwargs)
-            raise Started()
-
-        monkeypatch.setattr(subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(runner_module, "bwrap_available", lambda: True)
-        with pytest.raises(Started):
-            run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=tmp_path / "out"))
-        assert seen["stdin"] is subprocess.DEVNULL
+    @pytest.mark.skipif(not hasattr(os, "wait4"), reason="POSIX process runner")
+    def test_runner_gives_parser_no_stdin(self) -> None:
+        # The process runner bwrap goes through closes stdin: a reader sees EOF
+        # at once instead of the caller's terminal.
+        code = "import sys; print(repr(sys.stdin.read()))"
+        done = backend_module.run_process([sys.executable, "-c", code], timeout=30)
+        assert done.returncode == 0 and done.stdout.strip() == "''"
 
     @requires_bwrap
     def test_parser_is_session_leader_without_stdin(self, tmp_path: Path) -> None:
@@ -202,7 +195,7 @@ class TestFreshOutputDirectory:
         def must_not_run(*args, **kwargs):
             raise AssertionError("sandbox must not start with a non-empty artifact_dir")
 
-        monkeypatch.setattr(subprocess, "run", must_not_run)
+        monkeypatch.setattr(backend_module, "run_process", must_not_run)
         with pytest.raises(ValueError, match="not empty"):
             run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=artifact_dir))
 
@@ -210,7 +203,8 @@ class TestFreshOutputDirectory:
         self, artifact_dir: Path, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")
+            backend_module, "run_process",
+            lambda argv, **kw: backend_module.ProcessResult(0, "", "", False, None, None),
         )
         monkeypatch.setattr(runner_module, "bwrap_available", lambda: True)
         result = run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=artifact_dir))

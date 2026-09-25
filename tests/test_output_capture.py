@@ -104,3 +104,18 @@ def test_a_flooding_parser_is_truncated_in_every_backend(
     assert (tmp_path / "out" / "done").read_text() == "ok"  # the parser was never blocked
     assert len(result.stdout) < limit + 100 and "stdout truncated" in result.stdout
     assert len(result.stderr) < limit + 100 and "stderr truncated" in result.stderr
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "wait4"), reason="POSIX process runner")
+def test_the_process_runner_is_bounded_too() -> None:
+    # BubblewrapBackend runs through run_process (wait4, process-group kill,
+    # usage telemetry); its capture has the same bound as run_bounded.
+    from stele.containment.backend import run_process
+
+    limit = 64 * 1024
+    done = run_process([PYTHON, "-c", FLOOD.format(mib=32)], timeout=120, output_limit_bytes=limit)
+    assert done.returncode == 0 and not done.timed_out
+    for text, stream in ((done.stdout, "stdout"), (done.stderr, "stderr")):
+        assert len(text) < limit + 100
+        assert text.endswith(f"[stele: {stream} truncated at {limit} bytes]\n")
+    assert done.peak_memory_bytes is not None

@@ -112,12 +112,12 @@ bounds what the target holds:
 | mid-write | `in_flight` | some of the planned chunks |
 | after writing, before the receipt | `in_flight` | all of them |
 
-Each write attempt gets its own `attempt_id` (ledger schema 7), carried by
+Each write attempt gets its own `attempt_id` (ledger schema 8), carried by
 its intent and by its receipt or failure. Two dispatchers can deliver the
 same record to the same target at once, and the log keeps their attempts
 apart: one attempt's receipt never closes another's intent, so an attempt
 that never reported still counts as possibly written after the other one
-finishes. Events from before schema 7 have no `attempt_id` and are read one
+finishes. Events from before schema 8 have no `attempt_id` and are read one
 attempt at a time, as they were written.
 
 `Delivery.explain()` states that bound ("between 0 and N chunks … under
@@ -168,6 +168,48 @@ Ledger states are defined once, in [ledger.md](ledger.md#state-machine).
 Delivery is never a ledger state.
 
 ---
+
+## Adapters in this repo
+
+### ChatGPT export (`stele/adapters/chatgpt.py`)
+
+`ChatGPTExportAdapter` takes the sealed bundle of the Wasm splitter
+`chatgpt-export-split` (`stele/extractors`): `index.jsonl` plus one file per
+conversation, each holding the exact bytes of its element of
+`conversations.json`.
+
+- **Streamed.** `iter_chunks()` reads and verifies one conversation at a time,
+  so memory is bounded by the largest conversation, not the export.
+  `transform()` is `list(iter_chunks())`.
+- **Every branch.** A conversation is a tree. Editing a message or
+  regenerating a response keeps the old version as a sibling, and
+  `current_node` only marks the leaf the UI shows. The adapter walks the whole
+  `mapping` iteratively, so any depth works. Every node whose message has
+  content becomes one chunk, `<conversation_id>:<node_id>`, stable across
+  re-exports.
+- **Rebuildable.** Chunk metadata rebuilds each branch:
+  - `parent_node_id`, the nearest ancestor that has a chunk, so empty system
+    nodes don't break the chain;
+  - `raw_parent_id`, `depth`, `sibling_index` / `sibling_count`, `is_leaf`;
+  - `on_current_branch`;
+  - the conversation's `node_count` and `branch_count` (its leaves), and its
+    byte range in the original export (`export_offset` / `export_length`).
+- **Content types.** It renders `text`, `multimodal_text` (non-text parts
+  become `[image_asset_pointer: …]` references), `code`, `execution_output`,
+  `thoughts` and `user_editable_context`. Other types fall back to their
+  string fields.
+- **Deterministic.** Roots and siblings come in export order.
+- **Malformed input fails the transform:** a cycle, a node reached twice, a
+  `current_node` that doesn't exist, or a bundle from another parser. The
+  Dispatcher records the failure and writes nothing.
+
+### Canonical extraction (`stele/adapters/extraction.py`)
+
+`ExtractionAdapter` delivers the `stele.extraction` v1 units of any bundle
+that has a normalizer: Markdown from MinerU, Marker and Docling, and ChatGPT
+conversations. It emits one chunk per unit, with its kind, order, section
+parent and anchor. Before returning, it verifies every unit against the
+sealed bytes with the trusted resolver. See [extraction.md](extraction.md).
 
 ## Invariants proven
 

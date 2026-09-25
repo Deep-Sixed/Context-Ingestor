@@ -28,6 +28,28 @@ codebases that handle hostile input. Stele treats every parser as untrusted:
   hash-checked chunks. Only the Dispatcher, using writers you register, sends
   them to target stores. It logs an intent before each write and a receipt or
   failure after it, so a crash never leaves you guessing what a target holds.
+- **Report every run the same way.** Each run result carries the same
+  telemetry from every backend: wall and CPU time, peak memory, exit status,
+  the limits applied, and the backend and runtime. A failed run carries one
+  structured reason (timeout, out of memory, CPU limit, blocked syscall, Wasm
+  trap, crash, exit status, engine error, unsafe output) and leaves no output,
+  staging copy, process or container behind.
+- **Detect tampering.** Every ledger fact (a record created, sealed, failed
+  or invalidated, each delivery event, each replay) is appended to a
+  hash-chained event log in the same transaction as the change.
+  `python -m stele.ledger.events` verifies the chain, and checks that the
+  ledger's tables still match what it records. With a published anchor, it
+  also catches a truncated and rewritten log.
+- **Ingest ChatGPT exports whole.** A Wasm extractor splits `conversations.json`
+  byte for byte, and `ChatGPTExportAdapter` turns the sealed result into one
+  chunk per message on every conversation branch (edits and regenerations
+  included), reading one conversation at a time.
+- **One extraction format, checkable against the evidence.** `stele.extraction`
+  v1 turns any parser's output into ordered units (heading, paragraph, table,
+  code, message and so on). Each unit is anchored to a byte range or JSON
+  pointer in the sealed bundle. A trusted resolver re-reads every anchor from
+  the archive and refuses any unit whose text doesn't match.
+  `ExtractionAdapter` delivers the units through the Dispatcher.
 
 ```
 source ─▶ staging ─▶ sandboxed parser ─▶ /stele/output ─▶ ledger (pending)
@@ -129,10 +151,11 @@ Details and known limits: [docs/containment.md](docs/containment.md).
 
 | Doc | Covers |
 |-----|--------|
-| [Containment](docs/containment.md) | Sandbox backends, seccomp, Landlock, OCI and Wasm details |
-| [Ledger](docs/ledger.md) | State machine, record fields, parser identity, migration |
+| [Containment](docs/containment.md) | Sandbox backends, seccomp, Landlock, OCI and Wasm details, run telemetry and failure reasons |
+| [Ledger](docs/ledger.md) | State machine, record fields, parser identity, migration, the hash-chained event log |
 | [Replay](docs/replay.md) | Validation, replay outcomes, invalidation, ledger views |
-| [Adapter contract](docs/adapter.md) | `SteleAdapter`, `TargetWriter`, the Dispatcher and delivery log |
+| [Adapter contract](docs/adapter.md) | `SteleAdapter`, `TargetWriter`, the Dispatcher and delivery log, the ChatGPT export adapter |
+| [Extraction contract](docs/extraction.md) | `stele.extraction` v1, normalizers, the trusted resolver, `ExtractionAdapter` |
 | [Evidence store](docs/archive.md) | Content-addressed Snapshot and artifact archive |
 | [Cloud sandboxes](docs/cloud-sandboxes.md) | Design note for hosted sandbox backends (not implemented) |
 | [Parser images](parsers/README.md) | Building and running MinerU, Marker, Docling |
@@ -143,9 +166,11 @@ Details and known limits: [docs/containment.md](docs/containment.md).
 stele/
 ├── containment/   sandbox backends (bubblewrap, OCI, Wasmtime), staging, seccomp, Landlock
 ├── archive/       content-addressed evidence store
-├── ledger/        artifact ledger and delivery log (SQLite, WAL)
+├── ledger/        artifact ledger, delivery log and hash-chained event log (SQLite, WAL)
 ├── replay/        validation, replay engine, invalidation, views
 ├── contracts/     adapter, dispatcher and target-writer protocols
+├── adapters/      adapters (ChatGPT export: every branch, streamed; canonical extraction)
+├── extraction/    stele.extraction v1 contract, normalizers, trusted resolver
 ├── extractors/    deterministic Wasm extractors
 └── parsers/       packaged ML parsers in pinned images
 parsers/           parser image build files (MinerU, Marker, Docling)

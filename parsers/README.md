@@ -51,7 +51,10 @@ Each run gets:
   limits, and a timeout. A host whose engine cannot enforce them (e.g.
   rootless Podman without delegated cgroup controllers) is refused. Thread
   pools (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, the torch thread count, ...)
-  are capped to the CPU allowance.
+  are capped to the CPU allowance. Limits are checked before anything runs:
+  the memory limit uses the engine's syntax (`4g`, `1.5g`, `512mb`, `4GiB`),
+  the CPU limit is a positive number and the timeout a positive whole number
+  of seconds, so every run that finishes can be recorded in the ledger.
 - **No partial output.** A run that fails, times out or is killed at the
   memory limit keeps nothing it wrote, and nothing is stored in the evidence
   store. The input Snapshot is still archived.

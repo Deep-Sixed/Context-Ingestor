@@ -1,5 +1,5 @@
 """
-Overlapping write attempts on one delivery are told apart (ledger schema 7).
+Overlapping write attempts on one delivery are told apart (ledger schema 8).
 
 Two dispatchers can deliver the same record to the same target at once; #35
 lets them when their payloads match. Each attempt's intent, receipt and
@@ -119,11 +119,11 @@ def test_a_failure_before_writing_does_not_close_an_outstanding_attempt(
 
 
 # ---------------------------------------------------------------------------
-# Events from before schema 7
+# Events from before schema 8
 # ---------------------------------------------------------------------------
 
 def _legacy_ledger(tmp_path: Path, events: list[tuple[str, int | None]]):
-    """A version-6 ledger whose one delivery has these (event, done) events."""
+    """A version-7 ledger whose one delivery has these (event, done) events."""
     db = tmp_path / "ledger.db"
     ledger = open_ledger(db)
     record = _sealed(ledger, tmp_path)
@@ -141,13 +141,13 @@ def _legacy_ledger(tmp_path: Path, events: list[tuple[str, int | None]]):
             (dispatch_id, event, 2 if event == "intent" else None,
              "0" * 64 if event == "intent" else None, done, f"2026-01-01T00:00:{i:02d}+00:00"),
         )
-    conn.execute("PRAGMA user_version = 6")
+    conn.execute("PRAGMA user_version = 7")
     conn.commit()
     conn.close()
     return open_ledger(db), record, dispatch_id
 
 
-def test_version_6_events_migrate_and_read_as_before(tmp_path: Path) -> None:
+def test_version_7_events_migrate_and_read_as_before(tmp_path: Path) -> None:
     # A crashed attempt, a retry that delivered, then a removal: before
     # attempt ids the log read this as "nothing left", and still does.
     ledger, record, dispatch_id = _legacy_ledger(tmp_path, [
@@ -155,7 +155,7 @@ def test_version_6_events_migrate_and_read_as_before(tmp_path: Path) -> None:
         ("removal_intent", None), ("removal_receipt", 2),
     ])
     conn = sqlite3.connect(ledger.db_path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     conn.close()
 
     log = DeliveryLog(ledger)
@@ -193,3 +193,46 @@ def _bundle(ledger, record):
 
     return SealedBundle.from_record(ledger.get(record.record_id), ledger.archive)
 
+
+
+# ---------------------------------------------------------------------------
+# The event log (schema 7) commits to attempt ids
+# ---------------------------------------------------------------------------
+
+def test_the_chain_commits_to_attempt_ids(ledger, target, tmp_path) -> None:
+    from stele.ledger.events import verify_ledger
+
+    record = _sealed(ledger, tmp_path)
+    _dispatcher(ledger, target).dispatch(LinesAdapter(), record, WS)
+    assert verify_ledger(ledger).ok
+
+    conn = sqlite3.connect(ledger.db_path, isolation_level=None)
+    for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
+        conn.execute(f"DROP TRIGGER {name}")
+    # Pointing the receipt at another attempt would reopen the real one.
+    conn.execute("UPDATE delivery_events SET attempt_id='forged' WHERE event='receipt'")
+    conn.close()
+    report = verify_ledger(ledger)
+    assert not report.ok and any("differ from the chain" in p for p in report.problems)
+
+
+def test_version_7_ledger_is_not_imported_into_the_chain_again(tmp_path: Path) -> None:
+    from stele.ledger.events import EventLog, verify_ledger
+
+    db = tmp_path / "ledger.db"
+    ledger = open_ledger(db)
+    record = _sealed(ledger, tmp_path)
+    before = [e.kind for e in EventLog(ledger).events()]
+    ledger.close()
+
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")
+    conn.execute("PRAGMA user_version = 7")  # has the event log, no attempt ids
+    conn.commit()
+    conn.close()
+
+    migrated = open_ledger(db)
+    assert [e.kind for e in EventLog(migrated).events()] == before  # no *.imported events
+    assert "record.imported" not in before
+    assert migrated.get(record.record_id).state is record.state
+    assert verify_ledger(migrated).ok

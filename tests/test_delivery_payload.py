@@ -295,7 +295,8 @@ def test_version_5_ledger_gains_payload_binding(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(db)
     conn.execute("DROP TRIGGER delivery_events_one_payload")
-    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added by version 7
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added by version 8
+    conn.execute("DROP TABLE events")  # the event log arrives in v7
     conn.execute("DROP TABLE replays")
     for statement in REPLAY_DDL:  # the v5 replay log, without 'failed'
         conn.execute(statement)
@@ -310,7 +311,7 @@ def test_version_5_ledger_gains_payload_binding(tmp_path: Path) -> None:
 
     ledger = open_ledger(db)
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     assert conn.execute("SELECT outcome, reason FROM replays").fetchall() == [("diverged", "old")]
     conn.execute(
         "INSERT INTO replays (replay_id, record_id, outcome, reason, differences, platform, "

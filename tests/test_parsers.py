@@ -176,10 +176,25 @@ class TestRunParser:
         assert run.result.artifact_paths == []
         assert run.result.artifact_digests == {}
         assert run.result.artifact_bundle_digest is None
-        assert out.is_dir() and list(out.iterdir()) == []
+        assert not out.exists()  # the run created it, so the failure removed it
+        assert run.result.failure is not None
         # The input is still evidence of what the parser was given.
         assert run.result.input_snapshot is not None
         assert run.result.input_snapshot.digest == run.result.input_sha256
+
+    @pytest.mark.skipif(os.name == "nt", reason="needs POSIX symlinks")
+    def test_unsafe_output_with_exit_code_0_is_a_failure(self, doc: Path, tmp_path: Path) -> None:
+        class Symlinking(FakeBackend):
+            def execute(self, config):
+                outcome = super().execute(config)
+                os.symlink("/etc/hostname", config.artifact_dir / "link")
+                return outcome
+
+        run = run_parser(PARSER, doc, tmp_path / "out", backend=Symlinking())
+        assert run.result.exit_code == 0
+        assert not run.succeeded
+        assert run.failure.startswith("unsafe_artifact: ")
+        assert run.result.artifact_paths == []
 
     def test_success_stores_the_bundle(self, doc: Path, tmp_path: Path) -> None:
         store = BlobStore(tmp_path / "store")
@@ -363,7 +378,7 @@ class TestLive:
         run = run_parser(_probe(code), doc, tmp_path / "out", store=store, backend=backend)
         assert not run.succeeded
         assert "memory limit" in run.failure, (run.failure, run.result.stderr)
-        assert list((tmp_path / "out").iterdir()) == []
+        assert not (tmp_path / "out").exists()  # a failed run removes the output it created (#11)
         assert run.result.artifact_bundle_digest is None
         # Nothing lands in the caller's working directory (Podman's conmon
         # writes an "oom" file into its own working directory on OOM kills).
@@ -378,7 +393,7 @@ class TestLive:
         )
         run = run_parser(_probe(code), doc, tmp_path / "out", backend=backend, timeout_seconds=5)
         assert run.result.timed_out and "timed out" in run.failure
-        assert list((tmp_path / "out").iterdir()) == []
+        assert not (tmp_path / "out").exists()  # a failed run removes the output it created (#11)
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +572,44 @@ class TestReplay:
         backend = spec.backend(None)
         assert (backend.memory, backend.cpus, backend.gpu) == (PARSER.memory, PARSER.cpus, False)
         assert backend.image == PARSER.image
+
+    @pytest.mark.parametrize("memory", ["1.5g", "4gb", "512mb", "1t", "4GiB", "2048", "8G"])
+    def test_engine_memory_syntax_is_recorded(self, doc: Path, tmp_path: Path, memory: str) -> None:
+        """Docker and Podman accept these limits; a run made with one must reach the ledger."""
+        backend = FakeBackend(write=self._files(self.LAYOUT))
+        backend.memory = memory
+        ledger, record = self._record_with(tmp_path, doc, self.POLICY_PARSER, backend)
+        assert record.run_conditions.memory == memory
+        assert ledger.get(record.record_id).run_conditions.memory == memory
+
+    @pytest.mark.parametrize("limits", [
+        {"memory": "lots"}, {"memory": "0g"}, {"memory": "-1g"}, {"memory": "1.5x"},
+        {"cpus": -1.0}, {"timeout_seconds": 600.0}, {"timeout_seconds": -5},
+    ])
+    def test_bad_limits_are_refused_before_the_run(
+        self, doc: Path, tmp_path: Path, limits: dict
+    ) -> None:
+        """A limit the ledger cannot record is refused up front, not after a finished run."""
+        backend = FakeBackend(write=self._files(self.LAYOUT))
+        with pytest.raises(ValueError):
+            run_parser(self.POLICY_PARSER, doc, tmp_path / "out", backend=backend, **limits)
+        assert backend.seen is None
+
+    def test_a_given_backend_with_a_bad_limit_is_refused_before_the_run(
+        self, doc: Path, tmp_path: Path
+    ) -> None:
+        backend = FakeBackend(write=self._files(self.LAYOUT))
+        backend.memory = "lots"
+        with pytest.raises(ValueError, match="not a memory limit"):
+            run_parser(self.POLICY_PARSER, doc, tmp_path / "out", backend=backend)
+        assert backend.seen is None
+
+    def test_cli_refuses_a_bad_memory_limit(self, doc: Path, tmp_path: Path, capsys) -> None:
+        with pytest.raises(SystemExit) as exc:
+            cli_main(["run", "mineru", "--input", str(doc), "--artifact-dir",
+                      str(tmp_path / "o"), "--memory", "lots"])
+        assert exc.value.code == 2
+        assert "not a memory limit" in capsys.readouterr().err
 
     def test_image_not_present_is_unreplayable(self, doc: Path, tmp_path: Path) -> None:
         ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))

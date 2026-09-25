@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from .telemetry import RunFailure, RunTelemetry
+
 if TYPE_CHECKING:
     from ..archive.records import Snapshot
 
@@ -49,10 +51,14 @@ class SandboxResult:
     input_snapshot: Snapshot | None = None
     artifact_digests: dict[str, str] = field(default_factory=dict)
     artifact_bundle_digest: str | None = None
+    # Roadmap #11: the same telemetry from every backend, and on failure a
+    # structured reason. A failed run keeps no output (artifact_paths is empty).
+    telemetry: RunTelemetry | None = None
+    failure: RunFailure | None = None
 
     @property
     def succeeded(self) -> bool:
-        return self.exit_code == 0 and not self.timed_out
+        return self.failure is None and self.exit_code == 0 and not self.timed_out
 
     @property
     def produced_artifacts(self) -> bool:

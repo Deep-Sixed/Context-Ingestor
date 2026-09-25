@@ -45,6 +45,7 @@ from ..containment.oci import OciBackend
 from ..containment.result import SandboxResult
 from ..containment.runner import run_in_sandbox
 from ..containment.sandbox import SandboxConfig
+from ..ledger.models import is_memory_limit
 
 if TYPE_CHECKING:
     from ..archive.store import BlobStore
@@ -285,12 +286,25 @@ def describe_failure(result: SandboxResult, *, memory: str, timeout: int) -> str
     if result.exit_code != 0:
         detail = _last_line(result.stderr)
         return f"parser exited with status {result.exit_code}" + (f": {detail}" if detail else "")
+    if result.failure is not None:
+        # A failure the exit status does not show, e.g. unsafe output.
+        return f"{result.failure.reason.value}: {result.failure.detail}; output discarded"
     return None
 
 
 def _last_line(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return lines[-1][:500] if lines else ""
+
+
+def check_limits(*, memory: str, cpus: float, timeout_seconds: int) -> None:
+    """Raise ValueError for a limit a run could not be recorded under."""
+    if not is_memory_limit(memory):
+        raise ValueError(f"not a memory limit: {memory!r} (e.g. 4g, 1.5g, 512m)")
+    if isinstance(cpus, bool) or not isinstance(cpus, (int, float)) or not cpus > 0:
+        raise ValueError(f"CPU limit must be a positive number, not {cpus!r}")
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
+        raise ValueError(f"timeout must be a positive whole number of seconds, not {timeout_seconds!r}")
 
 
 def run_parser(
@@ -328,12 +342,15 @@ def run_parser(
     memory = memory or parser.memory
     cpus = cpus or parser.cpus
     timeout = timeout_seconds or parser.timeout_seconds
+    # Refuse limits the ledger cannot record now, not after a finished run.
+    check_limits(memory=memory, cpus=cpus, timeout_seconds=timeout)
 
     if backend is not None:
         chosen = backend
         # Record the limits the given backend actually applies.
         memory = getattr(backend, "memory", memory)
         cpus = getattr(backend, "cpus", cpus)
+        check_limits(memory=memory, cpus=cpus, timeout_seconds=timeout)
         dev: Literal["cpu", "gpu"] = "gpu" if getattr(backend, "gpu", False) else "cpu"
         requirements = ParserRequirements(
             requires_gpu=dev == "gpu", requires_native_libs=True, resource_limits=True,
@@ -356,7 +373,6 @@ def run_parser(
         requirements=requirements,
         backend=chosen,
         store=store,
-        discard_failed_output=True,
     )
     identity = ParserIdentity(
         parser=parser.name,

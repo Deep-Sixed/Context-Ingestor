@@ -138,7 +138,7 @@ def test_image_without_models_fails_cleanly(name: str, tmp_path: Path) -> None:
     assert run.result.exit_code == 3, run.result.stderr[-4000:]
     assert "model weights missing" in run.failure
     assert not run.result.timed_out  # refused at once, no download attempts
-    assert list(out.iterdir()) == []
+    assert not out.exists()  # a failed run removes the output it created (#11)
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -161,7 +161,7 @@ def test_unsupported_documents_are_clean_failures(name: str, tmp_path: Path) -> 
         run = run_parser(get_parser(name), DOCS / doc, out, backend=_cpu_backend(name))
         assert not run.succeeded
         assert reason in run.failure, run.result.stderr[-4000:]
-        assert list(out.iterdir()) == []
+        assert not out.exists()  # a failed run removes the output it created (#11)
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -179,7 +179,7 @@ def test_memory_limit_is_a_clean_failure(name: str, tmp_path: Path) -> None:
     assert not run.succeeded
     # Killed at the limit (137), or the parser caught MemoryError (4).
     assert run.result.exit_code in (137, 4), (run.result.exit_code, run.result.stderr[-4000:])
-    assert list(out.iterdir()) == []
+    assert not out.exists()  # a failed run removes the output it created (#11)
     assert run.result.artifact_bundle_digest is None
 
 
@@ -190,7 +190,7 @@ def test_time_limit_is_a_clean_failure(name: str, tmp_path: Path) -> None:
     out = tmp_path / "out"
     run = run_parser(parser, DOCS / doc, out, backend=_cpu_backend(name), timeout_seconds=3)
     assert run.result.timed_out and "timed out after 3s" in run.failure
-    assert list(out.iterdir()) == []
+    assert not out.exists()  # a failed run removes the output it created (#11)
 
 
 @pytest.mark.parametrize("name", NAMES)
