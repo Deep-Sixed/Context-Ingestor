@@ -78,7 +78,7 @@ Stele/
 │   ├── ledger/
 │   ├── replay/
 │   └── contracts/
-├── parsers/                ← parser image build files (MinerU)
+├── parsers/                ← parser image build files (MinerU, Marker, Docling)
 ├── tests/
 ├── pyproject.toml
 └── uv.lock

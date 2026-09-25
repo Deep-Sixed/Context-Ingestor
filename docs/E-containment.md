@@ -63,7 +63,7 @@ another backend; the requirements they must meet are in
 
 ### Packaged parsers (roadmap #9, #10)
 
-Heavy ML parsers (MinerU today) run on the OCI backend in pinned images with
+Heavy ML parsers (MinerU, Marker, Docling) run on the OCI backend in pinned images with
 model weights baked in: `stele.parsers.run_parser()` or
 `python -m stele.parsers run`. On top of the backend's guarantees, these runs
 require enforced resource limits (`ParserRequirements.resource_limits`), keep

@@ -21,7 +21,40 @@ MINERU = ParserImage(
     timeout_seconds=1800,
 )
 
-PARSERS: dict[str, ParserImage] = {p.name: p for p in (MINERU,)}
+MARKER = ParserImage(
+    name="marker",
+    version="2.0.0",
+    image="localhost/stele/marker:2.0.0",
+    containerfile="parsers/marker/Containerfile",
+    # Fast, text-layer mode: CPU layout/table detectors, no VLM OCR model in
+    # the image, so scans are refused rather than returned empty.
+    config={"mode": "fast", "disable_ocr": True, "extract_images": True},
+    formats=(".pdf", ".docx", ".pptx", ".xlsx", ".html", ".epub"),
+    gpu="never",
+    memory="6g",
+    cpus=2.0,
+    # Marker runs its layout and OCR-error models in local helper servers
+    # (loopback only; the sandbox has no other network).
+    pids_limit=2048,
+    tmpfs_size="2g",
+    timeout_seconds=1800,
+)
+
+DOCLING = ParserImage(
+    name="docling",
+    version="2.130.0",
+    image="localhost/stele/docling:2.130.0",
+    containerfile="parsers/docling/Containerfile",
+    config={"do_ocr": True, "force_full_page_ocr": False, "do_table_structure": True},
+    formats=(".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md", ".png", ".jpg", ".jpeg", ".tiff", ".tif"),
+    gpu="never",
+    memory="6g",
+    cpus=2.0,
+    tmpfs_size="2g",
+    timeout_seconds=1800,
+)
+
+PARSERS: dict[str, ParserImage] = {p.name: p for p in (MINERU, MARKER, DOCLING)}
 
 
 def get_parser(name: str) -> ParserImage:

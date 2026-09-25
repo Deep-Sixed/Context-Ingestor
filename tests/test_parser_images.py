@@ -57,14 +57,22 @@ def _norm(text: str) -> str:
     return _NOISE.sub(" ", text).lower()
 
 
+# Documents a parser accepts but is not expected to extract, with the reason
+# its run must fail with instead.
+REFUSED = {
+    ("marker", "scanned.pdf"): "no text extracted",  # no OCR model in the image
+}
+
+
 def _cases() -> list[tuple[str, str]]:
     cases = []
     for name in NAMES:
         parser = get_parser(name)
         for doc in sorted(MARKERS):
-            if Path(doc).suffix in parser.formats:
+            if Path(doc).suffix in parser.formats and (name, doc) not in REFUSED:
                 cases.append((name, doc))
     return cases
+
 
 
 def _cpu_backend(name: str, image: str | None = None) -> OciBackend:
@@ -139,3 +147,45 @@ def test_bad_configuration_is_refused(name: str, tmp_path: Path) -> None:
                      backend=_cpu_backend(name))
     assert run.result.exit_code == 2, run.result.stderr[-4000:]
     assert "unknown configuration keys: no_such_option" in run.failure
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_unsupported_documents_are_clean_failures(name: str, tmp_path: Path) -> None:
+    """Documents a parser accepts but cannot extract fail cleanly, keeping nothing."""
+    for (parser_name, doc), reason in REFUSED.items():
+        if parser_name != name:
+            continue
+        out = tmp_path / doc
+        run = run_parser(get_parser(name), DOCS / doc, out, backend=_cpu_backend(name))
+        assert not run.succeeded
+        assert reason in run.failure, run.result.stderr[-4000:]
+        assert list(out.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_memory_limit_is_a_clean_failure(name: str, tmp_path: Path) -> None:
+    """A parser that outgrows its memory limit is killed; nothing is kept."""
+    parser = get_parser(name)
+    doc = next(d for d in sorted(MARKERS) if Path(d).suffix == ".pdf")
+    store = BlobStore(tmp_path / "store")
+    out = tmp_path / "out"
+    backend = OciBackend(
+        image=parser.image, engine=ENGINE, memory="200m", cpus=parser.cpus,
+        pids_limit=parser.pids_limit, tmpfs_size="64m",
+    )
+    run = run_parser(parser, DOCS / doc, out, store=store, backend=backend)
+    assert not run.succeeded
+    # Killed at the limit (137), or the parser caught MemoryError (4).
+    assert run.result.exit_code in (137, 4), (run.result.exit_code, run.result.stderr[-4000:])
+    assert list(out.iterdir()) == []
+    assert run.result.artifact_bundle_digest is None
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_time_limit_is_a_clean_failure(name: str, tmp_path: Path) -> None:
+    parser = get_parser(name)
+    doc = next(d for d in sorted(MARKERS) if Path(d).suffix == ".pdf")
+    out = tmp_path / "out"
+    run = run_parser(parser, DOCS / doc, out, backend=_cpu_backend(name), timeout_seconds=3)
+    assert run.result.timed_out and "timed out after 3s" in run.failure
+    assert list(out.iterdir()) == []

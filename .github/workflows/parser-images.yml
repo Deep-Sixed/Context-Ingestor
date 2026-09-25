@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        parser: [mineru]
+        parser: [mineru, marker, docling]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
