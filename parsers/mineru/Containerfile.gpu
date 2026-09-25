@@ -41,12 +41,17 @@ ARG SKIP_MODELS=0
 ENV MINERU_MODEL_BASE_DIR=/opt/mineru/models \
     MINERU_MODEL_SMALL_BACKEND=torch \
     MINERU_MODEL_VLM_ENGINE=llama-cpp
+# MinerU takes a file lock under the model directory even when the models are
+# present, so its lock directory is a link to the per-run /tmp (the image root
+# is read-only at run time).
 RUN if [ "$SKIP_MODELS" != "1" ]; then \
       for tier in $MINERU_TIERS; do \
         MINERU_HOME=/tmp/mineru-build mineru-kit models download --tier "$tier" --source "$MODEL_SOURCE" || exit 1; \
       done; \
     fi \
  && mkdir -p /opt/mineru/models \
+ && rm -rf /opt/mineru/models/.locks \
+ && ln -s /tmp/mineru-locks /opt/mineru/models/.locks \
  && chmod -R a+rX,go-w /opt/mineru \
  && rm -rf /tmp/mineru-build /root/.cache
 
