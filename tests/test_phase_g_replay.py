@@ -32,7 +32,7 @@ from stele.replay.invalidation import (
     invalidate_record,
 )
 from stele.replay.models import ValidationResult
-from stele.replay.planner import plan_replay
+from stele.replay.planner import plan_validation
 from stele.replay.validator import validate_artifact
 from stele.replay.views import LedgerViews
 from tests.ledger_helpers import PROVENANCE, open_ledger
@@ -83,7 +83,7 @@ class TestReplaySelection:
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         record_id = _sealed_record(store, artifact_dir)
-        plan = plan_replay(store)
+        plan = plan_validation(store)
         assert any(c.record.record_id == record_id for c in plan.candidates)
 
     def test_plan_summary_counts_are_correct(
@@ -91,8 +91,8 @@ class TestReplaySelection:
     ) -> None:
         _sealed_record(store, artifact_dir, '{"v": 1}')
         _sealed_record(store, artifact_dir, '{"v": 2}')
-        plan = plan_replay(store)
-        assert plan.replayable_count == 2
+        plan = plan_validation(store)
+        assert plan.intact_count == 2
         assert plan.drifted_count == 0
         assert plan.missing_count == 0
 
@@ -111,7 +111,7 @@ class TestReplaySelection:
         )
         store.seal(rec2.record_id)
 
-        plan = plan_replay(store, run_id="run-aaa")
+        plan = plan_validation(store, run_id="run-aaa")
         assert len(plan.candidates) == 1
         assert plan.candidates[0].record.run_id == "run-aaa"
 
@@ -135,7 +135,7 @@ class TestHashMatchOk:
 
         result = validate_artifact(sealed)
         assert result.status == "ok"
-        assert result.is_replayable
+        assert result.is_intact
         assert not result.drifted_files
         assert not result.missing_files
 
@@ -143,8 +143,8 @@ class TestHashMatchOk:
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         _sealed_record(store, artifact_dir)
-        plan = plan_replay(store)
-        assert plan.replayable_count == 1
+        plan = plan_validation(store)
+        assert plan.intact_count == 1
         assert plan.drifted_count == 0
 
 
@@ -170,7 +170,7 @@ class TestDriftDetection:
 
         result = validate_artifact(sealed)
         assert result.status == "drift"
-        assert not result.is_replayable
+        assert not result.is_intact
         assert "result.json" in result.drifted_files
 
     def test_symlinked_artifact_is_drift_not_followed(
@@ -228,10 +228,10 @@ class TestDriftDetection:
         store.seal(record.record_id)
 
         p.write_text("v2 — mutated")
-        plan = plan_replay(store)
+        plan = plan_validation(store)
 
         assert plan.drifted_count == 1
-        assert plan.replayable_count == 0
+        assert plan.intact_count == 0
 
     def test_drift_summary_includes_filename(
         self, store: LedgerStore, artifact_dir: Path
@@ -269,7 +269,7 @@ class TestMissingDetection:
 
         result = validate_artifact(sealed)
         assert result.status == "missing"
-        assert not result.is_replayable
+        assert not result.is_intact
         assert "result.json" in result.missing_files
 
     def test_missing_takes_priority_over_drift(
@@ -300,9 +300,9 @@ class TestMissingDetection:
         store.seal(record.record_id)
         p.unlink()
 
-        plan = plan_replay(store)
+        plan = plan_validation(store)
         assert plan.missing_count == 1
-        assert plan.replayable_count == 0
+        assert plan.intact_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +317,7 @@ class TestInvalidatedExcludedByDefault:
         record_id = _sealed_record(store, artifact_dir)
         invalidate_record(store, record_id, InvalidationReason.MANUAL, note="test")
 
-        plan = plan_replay(store)
+        plan = plan_validation(store)
         assert not any(c.record.record_id == record_id for c in plan.candidates)
         assert len(plan.candidates) == 0
 
@@ -374,14 +374,14 @@ class TestInvalidatedExcludedByDefault:
         store.seal(rec.record_id)
         p.write_text("drifted")
 
-        plan = plan_replay(store)
+        plan = plan_validation(store)
         assert plan.drifted_count == 1
 
         auto_invalidate_drifted(store, plan.drifted)
         assert store.get(rec.record_id).state is ArtifactState.INVALIDATED
 
         # After invalidation, default replay plan is empty
-        clean_plan = plan_replay(store)
+        clean_plan = plan_validation(store)
         assert len(clean_plan.candidates) == 0
 
 
@@ -397,7 +397,7 @@ class TestNonSealedExcluded:
             **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        plan = plan_replay(store)
+        plan = plan_validation(store)
         assert len(plan.candidates) == 0
 
     def test_failed_record_excluded(self, store: LedgerStore, artifact_dir: Path) -> None:
@@ -408,7 +408,7 @@ class TestNonSealedExcluded:
         )
         store.fail(record.record_id, "parse error")
 
-        plan = plan_replay(store)
+        plan = plan_validation(store)
         assert len(plan.candidates) == 0
 
     def test_only_committed_records_in_replay(
@@ -439,7 +439,7 @@ class TestNonSealedExcluded:
         )
         store.fail(rec2.record_id, "error")
 
-        plan = plan_replay(store)
+        plan = plan_validation(store)
         assert len(plan.candidates) == 1
         assert plan.candidates[0].record.record_id == rec0.record_id
 
@@ -456,8 +456,8 @@ class TestIncludeInvalidatedMode:
         record_id = _sealed_record(store, artifact_dir)
         invalidate_record(store, record_id, InvalidationReason.MANUAL)
 
-        default_plan = plan_replay(store)
-        audit_plan = plan_replay(store, include_invalidated=True)
+        default_plan = plan_validation(store)
+        audit_plan = plan_validation(store, include_invalidated=True)
 
         assert len(default_plan.candidates) == 0
         assert len(audit_plan.candidates) == 1
@@ -474,8 +474,8 @@ class TestIncludeInvalidatedMode:
 
         invalidate_record(store, r1_id, InvalidationReason.DATA_QUALITY)
 
-        default_plan = plan_replay(store)
-        audit_plan = plan_replay(store, include_invalidated=True)
+        default_plan = plan_validation(store)
+        audit_plan = plan_validation(store, include_invalidated=True)
 
         # Default: only the non-invalidated sealed record
         assert len(default_plan.candidates) == 1

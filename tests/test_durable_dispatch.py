@@ -473,8 +473,10 @@ def test_version_2_ledger_gains_the_delivery_log(tmp_path: Path) -> None:
     for name in (
         "deliveries_append_only_u", "deliveries_append_only_d",
         "delivery_events_append_only_u", "delivery_events_append_only_d",
+        "replays_append_only_u", "replays_append_only_d",
     ):
         conn.execute(f"DROP TRIGGER {name}")
+    conn.execute("DROP TABLE replays")  # a v2 ledger has neither log
     conn.execute("DROP TABLE delivery_events")
     conn.execute("DROP TABLE deliveries")
     conn.execute("PRAGMA user_version = 2")
@@ -486,5 +488,5 @@ def test_version_2_ledger_gains_the_delivery_log(tmp_path: Path) -> None:
     target = MemoryTarget()
     assert _dispatcher(ledger, target).dispatch(LinesAdapter(), record, WS).status == "success"
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     conn.close()

@@ -5,7 +5,8 @@ Validates a single sealed ArtifactRecord against the filesystem by
 re-hashing every file in its manifest and comparing to the ledger.
 
 Does NOT modify the ledger.  Detection only — callers decide what to do
-with ValidationResult (e.g. schedule invalidation or proceed with replay).
+with ValidationResult (e.g. schedule invalidation). Validation never re-runs
+a parser; that is replay (stele.replay.engine).
 """
 from __future__ import annotations
 

@@ -1,0 +1,50 @@
+[
+ {
+  "title": "Frozen replay fixture",
+  "create_time": 1726000000.5,
+  "mapping": {
+   "a": {
+    "message": {
+     "author": {
+      "role": "user"
+     },
+     "content": {
+      "parts": [
+       "Is replay [deterministic]? {yes}"
+      ]
+     }
+    },
+    "children": [
+     "b"
+    ]
+   },
+   "b": {
+    "message": {
+     "author": {
+      "role": "assistant"
+     },
+     "content": {
+      "parts": [
+       "Byte for byte, on every OS — éè ☕"
+      ]
+     }
+    },
+    "children": []
+   }
+  }
+ },
+ {
+  "title": "Second",
+  "create_time": 1726000100.0,
+  "mapping": {}
+ },
+ {
+  "title": "Escapes \\\" and \\\\ inside",
+  "create_time": 1726000200.25,
+  "mapping": {
+   "x": {
+    "children": []
+   }
+  }
+ }
+]

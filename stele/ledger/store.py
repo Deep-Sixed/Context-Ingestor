@@ -26,9 +26,9 @@ from .hashing import UnsafeFileError, build_manifest, sha256_manifest
 from .models import ArtifactRecord, ArtifactState, ParserIdentity
 
 # PRAGMA user_version of the current schema. 0 is a pre-#12 ledger (or an
-# empty database), 2 has records only, 3 adds the delivery log (#13); see
-# stele/ledger/migration.py.
-SCHEMA_VERSION = 3
+# empty database), 2 has records only, 3 adds the delivery log (#13), 4 the
+# replay log (#14); see stele/ledger/migration.py.
+SCHEMA_VERSION = 4
 
 _DDL = (
     """
@@ -197,6 +197,38 @@ def canonical_parser_config(parser_config: Mapping[str, Any]) -> str:
     return encoded
 
 
+# The replay log (roadmap #14, stele/replay/engine.py): one row per replay of
+# a record, append-only like the delivery log.
+REPLAY_DDL = (
+    """
+    CREATE TABLE replays (
+        replay_id            TEXT PRIMARY KEY,
+        record_id            TEXT NOT NULL REFERENCES artifact_records(record_id),
+        outcome              TEXT NOT NULL CHECK (outcome IN (
+                                 'reproduced', 'equivalent', 'diverged', 'unreplayable')),
+        reason               TEXT NOT NULL,
+        replay_run_id        TEXT,     -- NULL when nothing was run
+        replay_artifact_hash TEXT,     -- tree digest of the replay's output in the archive
+        differences          TEXT NOT NULL,  -- JSON list of differing paths / policy findings
+        policy               TEXT,     -- canonical JSON of the comparison policy used
+        backend              TEXT,
+        platform             TEXT NOT NULL,
+        replayed_at          TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX idx_replay_record ON replays(record_id)",
+    "CREATE INDEX idx_replay_outcome ON replays(outcome)",
+    """
+    CREATE TRIGGER replays_append_only_u BEFORE UPDATE ON replays
+    BEGIN SELECT RAISE(ABORT, 'the replay log is append-only'); END
+    """,
+    """
+    CREATE TRIGGER replays_append_only_d BEFORE DELETE ON replays
+    BEGIN SELECT RAISE(ABORT, 'the replay log is append-only'); END
+    """,
+)
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     """A connection to a ledger database.
 
@@ -213,7 +245,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create the current schema. The caller holds the write transaction."""
-    for statement in (*_DDL, *DELIVERY_DDL):
+    for statement in (*_DDL, *DELIVERY_DDL, *REPLAY_DDL):
         conn.execute(statement)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 

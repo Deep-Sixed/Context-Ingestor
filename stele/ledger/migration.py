@@ -1,7 +1,8 @@
 """
 Migrating older ledgers to the current schema.
 
-Version 2 (#12) → 3 (#13) only adds the delivery log tables.
+Version 2 (#12) → 3 (#13) adds the delivery log tables, and 3 → 4 (#14) the
+replay log. Neither touches existing rows.
 
 Version 0 is a pre-#12 ledger.
 
@@ -35,7 +36,7 @@ from ..archive.store import ArchiveError, BlobStore
 from .hashing import UnsafeFileError
 from .store import (
     DELIVERY_DDL,
-    SCHEMA_VERSION,
+    REPLAY_DDL,
     ArtifactDriftError,
     MissingArtifactError,
     archive_bundle,
@@ -55,10 +56,13 @@ _V0_COLUMNS = {
 
 def migrate_to_current(conn: sqlite3.Connection, version: int, archive: BlobStore) -> None:
     """Migrate in place. The caller holds a BEGIN IMMEDIATE transaction."""
-    if version == 2:
-        for statement in DELIVERY_DDL:
-            conn.execute(statement)
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    additive = {2: DELIVERY_DDL, 3: REPLAY_DDL}  # version → DDL that reaches version + 1
+    if version in additive:
+        while version in additive:
+            for statement in additive[version]:
+                conn.execute(statement)
+            version += 1
+        conn.execute(f"PRAGMA user_version = {version}")
         return
     if version != 0:
         raise LedgerMigrationError(f"no migration from ledger schema version {version}")

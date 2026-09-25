@@ -14,6 +14,7 @@ class InvalidationReason(str, Enum):
     PARSER_UPDATED = "parser_updated"       # parser version changed, re-parse needed
     DATA_QUALITY = "data_quality"           # quality check failed on sealed artifact
     MANUAL = "manual"                       # explicit operator decision
+    REPLAY_DIVERGED = "replay_diverged"     # a replay was outside policy (roadmap #14)
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,7 @@ class ValidationResult:
     missing_files: tuple[str, ...]  # relative paths that no longer exist
 
     @property
-    def is_replayable(self) -> bool:
+    def is_intact(self) -> bool:
         return self.status == "ok"
 
     @property
@@ -45,38 +46,38 @@ class ValidationResult:
 
 
 @dataclass(frozen=True)
-class ReplayCandidate:
+class ValidationCandidate:
     """A sealed record paired with its current validation result."""
 
     record: ArtifactRecord
     validation: ValidationResult
 
     @property
-    def is_replayable(self) -> bool:
-        return self.validation.is_replayable
+    def is_intact(self) -> bool:
+        return self.validation.is_intact
 
 
 @dataclass(frozen=True)
-class ReplayPlan:
-    """The full set of candidates selected for a replay pass."""
+class ValidationPlan:
+    """The full set of candidates selected for a validation pass."""
 
-    candidates: tuple[ReplayCandidate, ...]
-
-    @property
-    def replayable(self) -> list[ReplayCandidate]:
-        return [c for c in self.candidates if c.is_replayable]
+    candidates: tuple[ValidationCandidate, ...]
 
     @property
-    def drifted(self) -> list[ReplayCandidate]:
+    def intact(self) -> list[ValidationCandidate]:
+        return [c for c in self.candidates if c.is_intact]
+
+    @property
+    def drifted(self) -> list[ValidationCandidate]:
         return [c for c in self.candidates if c.validation.status == "drift"]
 
     @property
-    def missing(self) -> list[ReplayCandidate]:
+    def missing(self) -> list[ValidationCandidate]:
         return [c for c in self.candidates if c.validation.status == "missing"]
 
     @property
-    def replayable_count(self) -> int:
-        return len(self.replayable)
+    def intact_count(self) -> int:
+        return len(self.intact)
 
     @property
     def drifted_count(self) -> int:
@@ -88,8 +89,8 @@ class ReplayPlan:
 
     def summary(self) -> str:
         return (
-            f"ReplayPlan: total={len(self.candidates)} "
-            f"replayable={self.replayable_count} "
+            f"ValidationPlan: total={len(self.candidates)} "
+            f"intact={self.intact_count} "
             f"drifted={self.drifted_count} "
             f"missing={self.missing_count}"
         )

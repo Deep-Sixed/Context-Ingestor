@@ -31,7 +31,7 @@ from stele.ledger.store import ArtifactDriftError, DuplicateRunError, LedgerStor
 from stele.ledger.transaction import ledger_transaction
 from stele.replay.invalidation import auto_invalidate_drifted, invalidate_record
 from stele.replay.models import InvalidationReason
-from stele.replay.planner import plan_replay
+from stele.replay.planner import plan_validation
 from stele.replay.validator import validate_artifact
 from tests.ledger_helpers import PROVENANCE, open_ledger
 
@@ -268,7 +268,7 @@ class TestBulkInvalidation:
         (artifact_dir / "b.json").write_text("b drifted")
         invalidate_record(store, done, InvalidationReason.MANUAL, note="already handled")
 
-        plan = plan_replay(store, include_invalidated=True)
+        plan = plan_validation(store, include_invalidated=True)
         assert len(plan.drifted) == 2
 
         invalidated = auto_invalidate_drifted(store, plan.drifted)

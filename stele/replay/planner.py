@@ -1,30 +1,28 @@
 """
-Stele Phase G — replay planner.
+Stele Phase G — validation planner.
 
-Selects sealed ledger records and validates them against the filesystem
-to produce a ReplayPlan.  The plan tells callers which records are clean and
-replayable versus which have drifted or lost their artifact files.
+Validation re-hashes the working copies of sealed artifacts and reports which
+are intact and which have drifted or gone missing. It never runs a parser.
 
-Does NOT re-run parsers — that would be a higher-level orchestration step
-using the adapter contract (Phase H).  Phase G only answers the question:
-"are these sealed artifacts still trustworthy?"
+Replay is a different operation: stele.replay.engine re-runs the recorded
+parser on the recorded input Snapshot and compares the output (roadmap #14).
 """
 from __future__ import annotations
 
 from ..ledger.models import ArtifactState
 from ..ledger.store import LedgerStore
-from .models import ReplayCandidate, ReplayPlan
+from .models import ValidationCandidate, ValidationPlan
 from .validator import validate_artifact
 
 
-def plan_replay(
+def plan_validation(
     store: LedgerStore,
     *,
     include_invalidated: bool = False,
     run_id: str | None = None,
     source_path: str | None = None,
-) -> ReplayPlan:
-    """Build a ReplayPlan from sealed ledger records.
+) -> ValidationPlan:
+    """Build a ValidationPlan from sealed ledger records.
 
     By default only SEALED records are considered.  Set
     include_invalidated=True to also include INVALIDATED records (useful
@@ -50,8 +48,8 @@ def plan_replay(
         records = [r for r in records if r.source_path == source_path]
 
     candidates = tuple(
-        ReplayCandidate(record=r, validation=validate_artifact(r))
+        ValidationCandidate(record=r, validation=validate_artifact(r))
         for r in records
     )
 
-    return ReplayPlan(candidates=candidates)
+    return ValidationPlan(candidates=candidates)

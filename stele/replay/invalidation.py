@@ -62,21 +62,21 @@ def invalidate_by_source_hash(
 
 def auto_invalidate_drifted(
     store: LedgerStore,
-    plan_candidates: list,  # list[ReplayCandidate]
+    plan_candidates: list,  # list[ValidationCandidate]
     *,
     note: str = "detected by validator",
 ) -> list[ArtifactRecord]:
-    """Invalidate all drifted or missing candidates from a ReplayPlan pass.
+    """Invalidate all drifted or missing candidates from a ValidationPlan pass.
 
-    Convenience wrapper: after plan_replay() detects drift or missing files,
+    Convenience wrapper: after plan_validation() detects drift or missing files,
     call this to bulk-invalidate those records so they are excluded from
-    subsequent replay passes.  Candidates that are already INVALIDATED (from
-    plan_replay(include_invalidated=True)) are skipped rather than aborting
+    subsequent validation passes.  Candidates that are already INVALIDATED (from
+    plan_validation(include_invalidated=True)) are skipped rather than aborting
     the batch partway through.
     """
     invalidated: list[ArtifactRecord] = []
     for candidate in plan_candidates:
-        if candidate.is_replayable or candidate.record.state is ArtifactState.INVALIDATED:
+        if candidate.is_intact or candidate.record.state is ArtifactState.INVALIDATED:
             continue
         reason = (
             InvalidationReason.DRIFT_DETECTED

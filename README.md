@@ -50,6 +50,14 @@ receipt or failure in an append-only delivery log. Writers get a `dispatch_id`
 idempotency key. `Dispatcher.invalidate()` removes a record's delivered data
 and records a receipt for each removal. See `docs/H-adapter.md`.
 
+**Replay (#14):** replay re-runs a record's parser at its recorded identity,
+with its recorded config, on its recorded input Snapshot. Each replay is
+reported as exactly one of `REPRODUCED`, `EQUIVALENT` (under the parser's
+comparison policy), `DIVERGED` or `UNREPLAYABLE`, and logged. Validation (the
+re-hash of working copies) is a separate operation. A frozen-Snapshot harness
+proves the Wasm extractor reproduces byte for byte on Linux, macOS and
+Windows. See `docs/G-replay.md`.
+
 ## Gate
 
 **RAG-ANYTHING: PROCEED — Stele-gated ingestion with scoped tombstone support.**
