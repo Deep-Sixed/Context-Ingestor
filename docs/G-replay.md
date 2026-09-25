@@ -20,8 +20,8 @@ never reported as each other.
 |---|---|---|
 | Question | Are the files I have still the bytes that were sealed? | Does the recorded parser, run again on the recorded input, still produce this output? |
 | Runs a parser | Never | Always (unless `UNREPLAYABLE`) |
-| Reads | The record's working copy (`artifact_dir`) | The input Snapshot and parser identity from the archive and catalog |
-| Result | `ok` / `drift` / `missing` per record | `REPRODUCED` / `EQUIVALENT` / `DIVERGED` / `UNREPLAYABLE` per replay |
+| Reads | The record's working copy (`artifact_dir`), falling back to the archive for files gone from disk | The input Snapshot and parser identity from the archive and catalog |
+| Result | `ok` / `archived` / `drift` / `missing` per record | `REPRODUCED` / `EQUIVALENT` / `DIVERGED` / `UNREPLAYABLE` per replay |
 | Code | `planner.plan_validation`, `validator.validate_artifact` | `engine.replay_record` |
 
 ## Validation
@@ -31,8 +31,15 @@ too, for audit) and re-hashes every file of each working copy against the
 recorded manifest, without following symlinks:
 
 - `ok`: every file is present and matches.
-- `drift`: a file changed, or was replaced by a symlink, FIFO or symlinked parent.
-- `missing`: a file is gone. Takes priority over drift.
+- `archived`: some files are gone from the working copy, but the evidence
+  archive holds each of them and they re-verify there. Still intact: sealing
+  may legitimately happen after the working copy is cleaned up (#12).
+- `drift`: a file on disk changed, or was replaced by a symlink, FIFO or
+  symlinked parent.
+- `missing`: a file is gone from disk and from the archive (or its archived
+  copy no longer verifies).
+
+Priority is missing, then drift, then archived.
 
 `auto_invalidate_drifted()` invalidates the records that are not intact.
 The sealed bundle in the archive is unaffected by working-copy drift.
@@ -143,7 +150,8 @@ Given a `run_id` or `source_hash`:
 
 - [x] Validation plan selects sealed records, validates the working copy
 - [x] Drift detection (content changed, final symlink, or symlinked parent substitution) → status "drift"
-- [x] Missing detection (file deleted) → status "missing"; takes priority over drift
+- [x] Missing detection (file deleted and not verifiable in the archive) → status "missing"; takes priority over drift
+- [x] A working copy cleaned up after sealing → status "archived", still intact, never invalidated as missing
 - [x] Invalidation: single record, bulk by source_hash, auto-invalidate-drifted
 - [x] Invalidated records excluded from the default validation plan
 - [x] include_invalidated=True re-includes for audit passes

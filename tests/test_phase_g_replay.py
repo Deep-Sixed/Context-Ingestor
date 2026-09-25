@@ -292,6 +292,7 @@ class TestMissingDetection:
         assert "a.json" in result.missing_files
 
     def test_missing_appears_in_plan(self, store: LedgerStore, artifact_dir: Path) -> None:
+        """Missing means gone from disk and from the archive."""
         p = _write(artifact_dir, "r.json", "data")
         record = store.create_pending(
             **PROVENANCE,
@@ -299,10 +300,63 @@ class TestMissingDetection:
         )
         store.seal(record.record_id)
         p.unlink()
+        digest = record.artifact_manifest["r.json"]
+        blob = store.archive.root / "blobs" / digest[:2] / digest[2:]
+        blob.chmod(0o600)
+        blob.write_bytes(b"corrupt")  # the archived copy no longer verifies
 
         plan = plan_validation(store)
         assert plan.missing_count == 1
         assert plan.intact_count == 0
+
+
+class TestSealedFromArchive:
+    """A sealed record whose working copy is gone but whose bundle is verified
+    in the archive is intact, never missing (review of #23)."""
+
+    def _sealed_then_cleaned(self, store: LedgerStore, artifact_dir: Path, *names: str):
+        paths = [_write(artifact_dir, n, f"content of {n}") for n in names]
+        record = store.create_pending(
+            **PROVENANCE,
+            run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=paths
+        )
+        return store.seal(record.record_id), paths
+
+    def test_cleaned_up_output_is_archived_not_missing(
+        self, store: LedgerStore, artifact_dir: Path
+    ) -> None:
+        record, paths = self._sealed_then_cleaned(store, artifact_dir, "a.json", "b.json")
+        for p in paths:
+            p.unlink()
+
+        plan = plan_validation(store)
+        [candidate] = plan.candidates
+        assert candidate.validation.status == "archived"
+        assert candidate.validation.archived_files == ("a.json", "b.json")
+        assert candidate.is_intact
+        assert (plan.missing_count, plan.intact_count) == (0, 1)
+
+        assert auto_invalidate_drifted(store, list(plan.candidates)) == []
+        assert store.get(record.record_id).state is ArtifactState.SEALED
+
+    def test_without_an_archive_the_working_copy_alone_decides(
+        self, store: LedgerStore, artifact_dir: Path
+    ) -> None:
+        record, paths = self._sealed_then_cleaned(store, artifact_dir, "a.json")
+        paths[0].unlink()
+        assert validate_artifact(record).status == "missing"
+        assert validate_artifact(record, store.archive).status == "archived"
+
+    def test_drift_on_disk_outranks_archived(
+        self, store: LedgerStore, artifact_dir: Path
+    ) -> None:
+        record, (a, b) = self._sealed_then_cleaned(store, artifact_dir, "a.json", "b.json")
+        a.unlink()
+        b.write_text("tampered")
+        result = validate_artifact(record, store.archive)
+        assert result.status == "drift"
+        assert (result.drifted_files, result.archived_files) == (("b.json",), ("a.json",))
+        assert not result.is_intact
 
 
 # ---------------------------------------------------------------------------

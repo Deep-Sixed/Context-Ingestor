@@ -22,22 +22,27 @@ class ValidationResult:
     """Outcome of re-hashing one sealed artifact record against the filesystem."""
 
     record_id: str
-    # "ok"      — all files present and hashes match
-    # "drift"   — all files present but one or more hashes changed
-    # "missing" — one or more files are absent from artifact_dir
-    status: Literal["ok", "drift", "missing"]
+    # "ok"       — all files present and hashes match
+    # "archived" — some files are gone from artifact_dir, but the evidence
+    #              archive holds and verifies each of them; still intact
+    # "drift"    — one or more files present on disk changed
+    # "missing"  — one or more files are gone from artifact_dir and from the archive
+    status: Literal["ok", "archived", "drift", "missing"]
     drifted_files: tuple[str, ...]  # relative paths whose content changed
-    missing_files: tuple[str, ...]  # relative paths that no longer exist
+    missing_files: tuple[str, ...]  # relative paths that no longer exist anywhere
+    archived_files: tuple[str, ...] = ()  # gone from disk, verified in the archive
 
     @property
     def is_intact(self) -> bool:
-        return self.status == "ok"
+        return self.status in ("ok", "archived")
 
     @property
     def drift_summary(self) -> str:
         if self.status == "ok":
             return "ok"
         parts = []
+        if self.archived_files:
+            parts.append(f"archived_only={list(self.archived_files)}")
         if self.missing_files:
             parts.append(f"missing={list(self.missing_files)}")
         if self.drifted_files:
