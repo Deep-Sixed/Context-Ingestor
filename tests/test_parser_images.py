@@ -74,9 +74,6 @@ def _cases() -> list[tuple[str, str]]:
     return cases
 
 
-def _refused() -> list[tuple[str, str]]:
-    return [key for key in REFUSED if key[0] in NAMES]
-
 
 def _cpu_backend(name: str, image: str | None = None) -> OciBackend:
     parser = get_parser(name)
@@ -152,13 +149,17 @@ def test_bad_configuration_is_refused(name: str, tmp_path: Path) -> None:
     assert "unknown configuration keys: no_such_option" in run.failure
 
 
-@pytest.mark.parametrize(("name", "doc"), _refused(), ids=[f"{n}-{d}" for n, d in _refused()])
-def test_unsupported_document_is_a_clean_failure(name: str, doc: str, tmp_path: Path) -> None:
-    out = tmp_path / "out"
-    run = run_parser(get_parser(name), DOCS / doc, out, backend=_cpu_backend(name))
-    assert not run.succeeded
-    assert REFUSED[(name, doc)] in run.failure, run.result.stderr[-4000:]
-    assert list(out.iterdir()) == []
+@pytest.mark.parametrize("name", NAMES)
+def test_unsupported_documents_are_clean_failures(name: str, tmp_path: Path) -> None:
+    """Documents a parser accepts but cannot extract fail cleanly, keeping nothing."""
+    for (parser_name, doc), reason in REFUSED.items():
+        if parser_name != name:
+            continue
+        out = tmp_path / doc
+        run = run_parser(get_parser(name), DOCS / doc, out, backend=_cpu_backend(name))
+        assert not run.succeeded
+        assert reason in run.failure, run.result.stderr[-4000:]
+        assert list(out.iterdir()) == []
 
 
 @pytest.mark.parametrize("name", NAMES)
