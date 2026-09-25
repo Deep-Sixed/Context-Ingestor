@@ -453,6 +453,59 @@ class TestInvalidationRemovesDeliveries:
         ]
         assert not delivery.possibly_written
 
+    def test_invalidation_racing_a_failed_write_removes_what_landed(
+        self, tmp_path, target
+    ) -> None:
+        db = tmp_path / "ledger.db"
+        ledger, other = open_ledger(db), open_ledger(db)
+        record = _sealed(ledger, tmp_path)
+        other_dispatcher = _dispatcher(other, target)
+        target.fail_after = 1  # one chunk lands, then the write fails
+
+        class RacingTarget(MemoryTarget):
+            def write_chunks(self, chunks, t, *, dispatch_id):
+                other_dispatcher.invalidate(record.record_id, "superseded")
+                target.write_chunks(chunks, t, dispatch_id=dispatch_id)
+
+            def remove_delivery(self, t, *, dispatch_id):
+                return target.remove_delivery(t, dispatch_id=dispatch_id)
+
+        dispatcher = Dispatcher(ledger)
+        dispatcher.register_target(LightRAGTarget, RacingTarget())
+        result = dispatcher.dispatch(LinesAdapter(), record, WS)
+
+        assert result.status == "failed" and result.chunks_written == 1
+        assert target.rows == {}
+        [delivery] = dispatcher.dispatch_log_for(record.record_id)
+        assert [e.event for e in delivery.events] == [
+            "intent", "removal_intent", "removal_receipt",  # the racing invalidation
+            "failure",                                      # one chunk landed after it
+            "removal_intent", "removal_receipt",            # so it was removed
+        ]
+        assert not delivery.possibly_written
+
+    def test_write_in_flight_during_removal_is_removed_again(
+        self, ledger, target, tmp_path, monkeypatch
+    ) -> None:
+        """A removal cannot clear a write whose outcome was never logged: the
+        dispatching process may have crashed after its chunks landed."""
+        record = TestCrashRecovery()._crash(ledger, target, tmp_path, monkeypatch, "before_receipt")
+        dispatcher = _dispatcher(ledger, target)
+        [delivery] = dispatcher.dispatch_log_for(record.record_id)
+        # Simulate a removal that ran while the write was still in flight,
+        # before its chunks reached the target.
+        landed = dict(target.rows)
+        target.rows.clear()
+        dispatcher.invalidate(record.record_id, "stale")
+        target.rows.update(landed)  # the in-flight write lands afterwards
+
+        delivery = dispatcher.delivery(delivery.dispatch_id)
+        assert delivery.status is DeliveryStatus.REMOVED
+        assert delivery.possibly_written
+        [removed] = dispatcher.retract_invalidated()
+        assert removed.status == "removed" and removed.chunks_removed == 2
+        assert target.rows == {}
+
     def test_retract_needs_an_invalidated_record(self, ledger, target, tmp_path) -> None:
         record = _sealed(ledger, tmp_path)
         with pytest.raises(ValueError, match="only invalidated"):
@@ -479,6 +532,7 @@ def test_version_2_ledger_gains_the_delivery_log(tmp_path: Path) -> None:
     conn.execute("DROP TABLE replays")  # a v2 ledger has neither log
     conn.execute("DROP TABLE delivery_events")
     conn.execute("DROP TABLE deliveries")
+    conn.execute("ALTER TABLE artifact_records DROP COLUMN run_settings")
     conn.execute("PRAGMA user_version = 2")
     conn.commit()
     conn.close()

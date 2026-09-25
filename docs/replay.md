@@ -104,8 +104,15 @@ each carry `ML_REPLAY_POLICY`:
 
 `stele.parsers.replay.record_parser_run(ledger, run, source=...)` records a
 packaged-parser run in the ledger; the Source is required so the replay can
-give the document its original name (the parsers pick their reader by suffix). `replay_spec(parser)` replays it on the CPU image through the same
-command and configuration environment as `run_parser()`. The parser-images
+give the document its original name (the parsers pick their reader by suffix).
+It also records the run's `run_settings` (device, memory and CPU limits,
+timeout). `replay_spec(parser)` replays it through the same command and
+configuration environment as `run_parser()`, with those settings: a GPU run
+replays on the GPU image (UNREPLAYABLE on a host without a GPU, never on the
+CPU instead), and a run given a longer timeout or more CPUs gets them again.
+Records without `run_settings` replay on the CPU image with the parser's
+defaults. Any `ParserSpec` can opt in the same way through
+`with_run_settings`. The parser-images
 workflow replays a real document through each built image and expects
 `EQUIVALENT`.
 

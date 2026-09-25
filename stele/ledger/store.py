@@ -27,8 +27,8 @@ from .models import ArtifactRecord, ArtifactState, ParserIdentity
 
 # PRAGMA user_version of the current schema. 0 is a pre-#12 ledger (or an
 # empty database), 2 has records only, 3 adds the delivery log (#13), 4 the
-# replay log (#14); see stele/ledger/migration.py.
-SCHEMA_VERSION = 4
+# replay log (#14), 5 records' run settings; see stele/ledger/migration.py.
+SCHEMA_VERSION = 5
 
 _DDL = (
     """
@@ -45,6 +45,7 @@ _DDL = (
         parser_module_sha256 TEXT,
         parser_config        TEXT,     -- canonical JSON object
         backend              TEXT,
+        run_settings         TEXT,     -- canonical JSON object: how the parser was run
         artifact_dir         TEXT NOT NULL,
         artifact_manifest    TEXT NOT NULL,   -- JSON: {rel_path: sha256}
         artifact_hash        TEXT NOT NULL,   -- tree digest in the archive
@@ -171,6 +172,9 @@ def _row_to_record(row: sqlite3.Row) -> ArtifactRecord:
             json.loads(row["parser_config"]) if row["parser_config"] is not None else None
         ),
         backend=row["backend"],
+        run_settings=(
+            json.loads(row["run_settings"]) if row["run_settings"] is not None else None
+        ),
         artifact_dir=row["artifact_dir"],
         artifact_manifest=json.loads(row["artifact_manifest"]),
         artifact_hash=row["artifact_hash"],
@@ -182,19 +186,23 @@ def _row_to_record(row: sqlite3.Row) -> ArtifactRecord:
     )
 
 
-def canonical_parser_config(parser_config: Mapping[str, Any]) -> str:
+def canonical_parser_config(parser_config: Mapping[str, Any], *, name: str = "parser_config") -> str:
     """The one stored form of a parser config: canonical JSON of an object."""
     if not isinstance(parser_config, Mapping):
-        raise ValueError("parser_config must be a mapping (a JSON object)")
+        raise ValueError(f"{name} must be a mapping (a JSON object)")
     try:
         encoded = canonical_json(dict(parser_config)).decode("utf-8")
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"parser_config is not JSON-serializable: {exc}") from exc
+        raise ValueError(f"{name} is not JSON-serializable: {exc}") from exc
     # JSON silently turns tuples into lists and int keys into strings; the
     # stored config must be exactly the one the parser was given.
     if json.loads(encoded) != dict(parser_config):
-        raise ValueError("parser_config does not survive a JSON round trip unchanged")
+        raise ValueError(f"{name} does not survive a JSON round trip unchanged")
     return encoded
+
+
+# Version 4 → 5: records gain the settings their parser ran with.
+RUN_SETTINGS_DDL = ("ALTER TABLE artifact_records ADD COLUMN run_settings TEXT",)
 
 
 # The replay log (roadmap #14, stele/replay/engine.py): one row per replay of
@@ -359,6 +367,7 @@ class LedgerStore:
         input_snapshot: Snapshot | None = None,
         source: Source | None = None,
         backend: str | None = None,
+        run_settings: Mapping[str, Any] | None = None,
     ) -> ArtifactRecord:
         """Record one run's artifact bundle as PENDING.
 
@@ -374,12 +383,20 @@ class LedgerStore:
         another run's: the archive stores the content once, and each record
         keeps its own provenance. A second record for the same run_id raises
         DuplicateRunError.
+
+        run_settings records how the parser was run beyond its config (for
+        packaged parsers: device, CPU and memory limits, timeout), so a replay
+        can run it the same way.
         """
         if not artifact_paths:
             raise ValueError("cannot create a pending record with no artifacts")
         if not isinstance(parser, ParserIdentity):
             raise TypeError("parser must be a ParserIdentity")
         config_json = canonical_parser_config(parser_config)
+        settings_json = (
+            canonical_parser_config(run_settings, name="run_settings")
+            if run_settings is not None else None
+        )
 
         source_hash = source_kind = source_id = source_path = None
         if input_snapshot is not None:
@@ -408,14 +425,14 @@ class LedgerStore:
                 INSERT INTO artifact_records
                     (record_id, run_id, source_path, source_id, source_hash, source_kind,
                      parser_name, parser_version, parser_image_digest, parser_module_sha256,
-                     parser_config, backend, artifact_dir, artifact_manifest,
+                     parser_config, backend, run_settings, artifact_dir, artifact_manifest,
                      artifact_hash, state, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 (
                     record_id, run_id, source_path, source_id, source_hash, source_kind,
                     parser.name, parser.version, parser.image_digest, parser.module_sha256,
-                    config_json, backend, str(artifact_dir), json.dumps(manifest),
+                    config_json, backend, settings_json, str(artifact_dir), json.dumps(manifest),
                     artifact_hash, _now_iso(),
                 ),
             )
