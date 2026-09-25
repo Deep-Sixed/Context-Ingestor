@@ -3,10 +3,10 @@ Regressions for the three-way code review of the hardening stack.
 
   1. An unreadable directory in parser output fails collection instead of
      being skipped (partial bundles must never be recorded as complete).
-  2. ledger_transaction marks the record FAILED when commit-time verification
+  2. ledger_transaction marks the record FAILED when seal-time verification
      fails or the block is interrupted, instead of leaving it PENDING.
   3. Ledger state transitions are conditional on the state that was checked,
-     so a racing commit cannot overwrite an invalidation.
+     so a racing seal cannot overwrite an invalidation.
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from stele.ledger.store import (
     LedgerStore,
 )
 from stele.ledger.transaction import ledger_transaction
+from tests.ledger_helpers import PROVENANCE, open_ledger
 
 PYTHON = str(Path(sys.executable).resolve())
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -126,15 +127,15 @@ class TestUnreadableOutputDirectory:
 
 class TestTransactionFinalizesRecord:
 
-    def test_commit_failure_marks_record_failed(
+    def test_seal_failure_marks_record_failed(
         self, tmp_path: Path, artifact_dir: Path
     ) -> None:
-        store = LedgerStore(tmp_path / "ledger.db")
+        store = open_ledger(tmp_path / "ledger.db")
         (artifact_dir / "result.json").write_text("original")
 
         with pytest.raises(ArtifactDriftError):
-            with ledger_transaction(store, _result(artifact_dir)) as record:
-                # Downstream work happens here; then the bundle drifts before commit.
+            with ledger_transaction(store, _result(artifact_dir), **PROVENANCE) as record:
+                # The bundle drifts before it is sealed.
                 (artifact_dir / "result.json").write_text("tampered")
 
         final = store.get(record.record_id)
@@ -144,25 +145,25 @@ class TestTransactionFinalizesRecord:
     def test_keyboard_interrupt_in_block_marks_record_failed(
         self, tmp_path: Path, artifact_dir: Path
     ) -> None:
-        store = LedgerStore(tmp_path / "ledger.db")
+        store = open_ledger(tmp_path / "ledger.db")
         (artifact_dir / "result.json").write_text("data")
 
         with pytest.raises(KeyboardInterrupt):
-            with ledger_transaction(store, _result(artifact_dir)) as record:
+            with ledger_transaction(store, _result(artifact_dir), **PROVENANCE) as record:
                 raise KeyboardInterrupt
 
         assert store.get(record.record_id).state is ArtifactState.FAILED
 
-    def test_commit_failure_after_concurrent_invalidation_keeps_original_error(
+    def test_seal_failure_after_concurrent_invalidation_keeps_original_error(
         self, tmp_path: Path, artifact_dir: Path
     ) -> None:
         db = tmp_path / "ledger.db"
-        store = LedgerStore(db)
-        other = LedgerStore(db)
+        store = open_ledger(db)
+        other = open_ledger(db)
         (artifact_dir / "result.json").write_text("data")
 
         with pytest.raises(InvalidStateTransitionError):
-            with ledger_transaction(store, _result(artifact_dir)) as record:
+            with ledger_transaction(store, _result(artifact_dir), **PROVENANCE) as record:
                 other.invalidate(record.record_id, "superseded")
 
         assert store.get(record.record_id).state is ArtifactState.INVALIDATED
@@ -178,28 +179,29 @@ class TestConditionalTransitions:
         p = artifact_dir / f"r_{uuid.uuid4().hex[:8]}.json"
         p.write_text(uuid.uuid4().hex)
         rec = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
         return rec.record_id
 
-    def test_commit_racing_invalidation_does_not_resurrect_record(
+    def test_seal_racing_invalidation_does_not_resurrect_record(
         self, tmp_path: Path, artifact_dir: Path, monkeypatch
     ) -> None:
         db = tmp_path / "ledger.db"
-        a, b = LedgerStore(db), LedgerStore(db)
+        a, b = open_ledger(db), open_ledger(db)
         record_id = self._pending(a, artifact_dir)
 
-        real_build = store_module.build_manifest
+        real_archive = store_module.archive_bundle
 
-        def build_then_race(*args, **kwargs):
-            # commit() has already checked state == pending; another connection
-            # invalidates before commit() writes.
-            b.invalidate(record_id, "superseded mid-commit")
-            return real_build(*args, **kwargs)
+        def archive_then_race(*args, **kwargs):
+            # seal() has already checked state == pending; another connection
+            # invalidates before seal() writes.
+            b.invalidate(record_id, "superseded mid-seal")
+            return real_archive(*args, **kwargs)
 
-        monkeypatch.setattr(store_module, "build_manifest", build_then_race)
+        monkeypatch.setattr(store_module, "archive_bundle", archive_then_race)
         with pytest.raises(InvalidStateTransitionError, match="concurrently"):
-            a.commit(record_id)
+            a.seal(record_id)
 
         assert a.get(record_id).state is ArtifactState.INVALIDATED
         assert b.get(record_id).state is ArtifactState.INVALIDATED
@@ -208,7 +210,7 @@ class TestConditionalTransitions:
         self, tmp_path: Path, artifact_dir: Path, monkeypatch
     ) -> None:
         db = tmp_path / "ledger.db"
-        a, b = LedgerStore(db), LedgerStore(db)
+        a, b = open_ledger(db), open_ledger(db)
         record_id = self._pending(a, artifact_dir)
 
         real_require = LedgerStore._require
@@ -228,11 +230,11 @@ class TestConditionalTransitions:
         assert b.get(record_id).state is ArtifactState.FAILED
 
     def test_normal_transitions_still_work(self, tmp_path: Path, artifact_dir: Path) -> None:
-        store = LedgerStore(tmp_path / "ledger.db")
-        committed = self._pending(store, artifact_dir)
-        store.commit(committed)
-        store.invalidate(committed, "stale")
-        assert store.get(committed).state is ArtifactState.INVALIDATED
+        store = open_ledger(tmp_path / "ledger.db")
+        sealed = self._pending(store, artifact_dir)
+        store.seal(sealed)
+        store.invalidate(sealed, "stale")
+        assert store.get(sealed).state is ArtifactState.INVALIDATED
 
         failed = self._pending(store, artifact_dir)
         store.fail(failed, "boom")
@@ -250,7 +252,7 @@ class TestOriginalErrorIsNeverMasked:
     ) -> None:
         import sqlite3
 
-        store = LedgerStore(tmp_path / "ledger.db")
+        store = open_ledger(tmp_path / "ledger.db")
         (artifact_dir / "result.json").write_text("data")
 
         def locked(*args, **kwargs):
@@ -260,43 +262,43 @@ class TestOriginalErrorIsNeverMasked:
             pass
 
         with pytest.raises(AdapterError):
-            with ledger_transaction(store, _result(artifact_dir)):
+            with ledger_transaction(store, _result(artifact_dir), **PROVENANCE):
                 monkeypatch.setattr(store, "fail", locked)
                 raise AdapterError("downstream write failed")
 
-    def test_read_back_failure_after_durable_commit_is_not_a_failure(
+    def test_read_back_failure_after_durable_seal_is_not_a_failure(
         self, tmp_path: Path, artifact_dir: Path, monkeypatch
     ) -> None:
-        store = LedgerStore(tmp_path / "ledger.db")
+        store = open_ledger(tmp_path / "ledger.db")
         (artifact_dir / "result.json").write_text("data")
-        real_commit = store.commit
+        real_seal = store.seal
 
-        def commit_then_readback_fails(record_id):
-            real_commit(record_id)
-            raise RuntimeError("read-back failed after COMMITTED was written")
+        def seal_then_readback_fails(record_id):
+            real_seal(record_id)
+            raise RuntimeError("read-back failed after SEALED was written")
 
-        monkeypatch.setattr(store, "commit", commit_then_readback_fails)
-        with ledger_transaction(store, _result(artifact_dir)) as record:
+        monkeypatch.setattr(store, "seal", seal_then_readback_fails)
+        with ledger_transaction(store, _result(artifact_dir), **PROVENANCE) as record:
             pass
 
-        assert store.get(record.record_id).state is ArtifactState.COMMITTED
+        assert store.get(record.record_id).state is ArtifactState.SEALED
 
-    def test_interrupt_after_durable_commit_still_propagates(
+    def test_interrupt_after_durable_seal_still_propagates(
         self, tmp_path: Path, artifact_dir: Path, monkeypatch
     ) -> None:
-        store = LedgerStore(tmp_path / "ledger.db")
+        store = open_ledger(tmp_path / "ledger.db")
         (artifact_dir / "result.json").write_text("data")
-        real_commit = store.commit
+        real_seal = store.seal
 
-        def commit_then_interrupt(record_id):
-            real_commit(record_id)
+        def seal_then_interrupt(record_id):
+            real_seal(record_id)
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(store, "commit", commit_then_interrupt)
+        monkeypatch.setattr(store, "seal", seal_then_interrupt)
         with pytest.raises(KeyboardInterrupt):
-            with ledger_transaction(store, _result(artifact_dir)) as record:
+            with ledger_transaction(store, _result(artifact_dir), **PROVENANCE) as record:
                 pass
-        assert store.get(record.record_id).state is ArtifactState.COMMITTED
+        assert store.get(record.record_id).state is ArtifactState.SEALED
 
 
 class TestUnsearchableOutputDirectory:

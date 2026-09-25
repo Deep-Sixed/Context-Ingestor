@@ -5,10 +5,13 @@ Six required proofs:
 
   PASS 1 — Artifact record created as pending
   PASS 2 — Hash is deterministic
-  PASS 3 — Pending can become committed
-  PASS 4 — Failed parser marks record failed, not committed
-  PASS 5 — Missing artifact cannot be committed
-  PASS 6 — Duplicate artifact hash is idempotent or rejected explicitly
+  PASS 3 — Pending can become sealed (bundle archived and verified)
+  PASS 4 — Failed parser marks record failed, not sealed
+  PASS 5 — Missing artifact cannot be sealed
+  PASS 6 — Identical output from separate runs keeps separate records
+
+Provenance (input Snapshot, parser identity) and migration are proved in
+tests/test_ledger_provenance.py.
 
 Run:
     cd EVECOR/services/stele
@@ -26,12 +29,13 @@ from stele.ledger.hashing import UnsafeFileError, build_manifest, sha256_file, s
 from stele.ledger.models import ArtifactState
 from stele.ledger.store import (
     ArtifactDriftError,
-    DuplicateArtifactError,
+    DuplicateRunError,
     InvalidStateTransitionError,
     LedgerStore,
     MissingArtifactError,
 )
 from stele.ledger.transaction import SandboxFailedError, ledger_transaction
+from tests.ledger_helpers import PROVENANCE, open_ledger
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +44,7 @@ from stele.ledger.transaction import SandboxFailedError, ledger_transaction
 
 @pytest.fixture
 def store(tmp_path: Path) -> LedgerStore:
-    return LedgerStore(tmp_path / "ledger.db")
+    return open_ledger(tmp_path / "ledger.db")
 
 
 @pytest.fixture
@@ -85,6 +89,7 @@ class TestPendingCreation:
         result = _make_sandbox_result(artifact_dir, [p])
 
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(result.run_id),
             artifact_dir=artifact_dir,
             artifact_paths=result.artifact_paths,
@@ -99,22 +104,36 @@ class TestPendingCreation:
         run_id = str(uuid.uuid4())
 
         record = store.create_pending(
+            **PROVENANCE,
             run_id=run_id,
             artifact_dir=artifact_dir,
             artifact_paths=[p],
-            source_path="/some/input.pdf",
-            source_hash="abc123",
         )
 
         assert record.run_id == run_id
-        assert record.source_path == "/some/input.pdf"
-        assert record.source_hash == "abc123"
+        assert record.source_path is None and record.source_hash is None
+        assert record.parser == PROVENANCE["parser"]
+        assert record.parser_config == PROVENANCE["parser_config"]
         assert "out.txt" in record.artifact_manifest
         assert record.artifact_hash  # non-empty
+
+    def test_source_hash_cannot_be_supplied(
+        self, store: LedgerStore, artifact_dir: Path
+    ) -> None:
+        p = _write_artifact(artifact_dir, "out.txt", "hello")
+        with pytest.raises(TypeError, match="source_hash"):
+            store.create_pending(
+                **PROVENANCE,
+                run_id=str(uuid.uuid4()),
+                artifact_dir=artifact_dir,
+                artifact_paths=[p],
+                source_hash="abc123",
+            )
 
     def test_record_retrievable_by_id(self, store: LedgerStore, artifact_dir: Path) -> None:
         p = _write_artifact(artifact_dir, "x.json", "{}")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()),
             artifact_dir=artifact_dir,
             artifact_paths=[p],
@@ -126,6 +145,7 @@ class TestPendingCreation:
     def test_empty_artifact_list_raises(self, store: LedgerStore, artifact_dir: Path) -> None:
         with pytest.raises(ValueError, match="no artifacts"):
             store.create_pending(
+                **PROVENANCE,
                 run_id=str(uuid.uuid4()),
                 artifact_dir=artifact_dir,
                 artifact_paths=[],
@@ -223,74 +243,82 @@ class TestDeterministicHash:
 
 
 # ---------------------------------------------------------------------------
-# PASS 3 — Pending can become committed
+# PASS 3 — Pending can become sealed
 # ---------------------------------------------------------------------------
 
-class TestCommit:
+class TestSeal:
 
-    def test_pending_transitions_to_committed(
+    def test_pending_transitions_to_sealed(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         p = _write_artifact(artifact_dir, "result.json", "{}")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        committed = store.commit(record.record_id)
+        sealed = store.seal(record.record_id)
 
-        assert committed.state is ArtifactState.COMMITTED
-        assert committed.finalized_at is not None
+        assert sealed.state is ArtifactState.SEALED
+        assert sealed.finalized_at is not None
+        # Sealed means the bundle is in the archive and verified.
+        assert store.archive.read_tree(sealed.artifact_hash) == sealed.artifact_manifest
+        for digest in sealed.artifact_manifest.values():
+            assert store.archive.has(digest)
 
-    def test_committed_state_persists(self, store: LedgerStore, artifact_dir: Path) -> None:
+    def test_sealed_state_persists(self, store: LedgerStore, artifact_dir: Path) -> None:
         p = _write_artifact(artifact_dir, "r.json", "{}")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
+        store.seal(record.record_id)
         refetched = store.get(record.record_id)
-        assert refetched.state is ArtifactState.COMMITTED
+        assert refetched.state is ArtifactState.SEALED
 
-    def test_changed_pending_artifact_cannot_commit(
+    def test_changed_pending_artifact_cannot_seal(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         p = _write_artifact(artifact_dir, "r.json", "before")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
         p.write_text("after")
 
         with pytest.raises(ArtifactDriftError, match="changed after pending"):
-            store.commit(record.record_id)
+            store.seal(record.record_id)
 
         assert store.get(record.record_id).state is ArtifactState.PENDING
 
-    def test_commit_already_committed_raises(
+    def test_seal_already_sealed_raises(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         p = _write_artifact(artifact_dir, "r.json", "{}")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
+        store.seal(record.record_id)
 
         with pytest.raises(InvalidStateTransitionError):
-            store.commit(record.record_id)
+            store.seal(record.record_id)
 
-    def test_ledger_transaction_commits_on_clean_exit(
+    def test_ledger_transaction_seals_on_clean_exit(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         p = _write_artifact(artifact_dir, "result.json", '{"ok": true}')
         result = _make_sandbox_result(artifact_dir, [p])
 
-        with ledger_transaction(store, result) as record:
+        with ledger_transaction(store, result, **PROVENANCE) as record:
             assert record.state is ArtifactState.PENDING
             pending_id = record.record_id
 
         final = store.get(pending_id)
-        assert final.state is ArtifactState.COMMITTED
+        assert final.state is ArtifactState.SEALED
 
 
 # ---------------------------------------------------------------------------
-# PASS 4 — Failed parser marks record failed, not committed
+# PASS 4 — Failed parser marks record failed, not sealed
 # ---------------------------------------------------------------------------
 
 class TestFailedParser:
@@ -302,7 +330,7 @@ class TestFailedParser:
         result = _make_sandbox_result(artifact_dir, artifact_paths=[], exit_code=1)
 
         with pytest.raises(SandboxFailedError):
-            with ledger_transaction(store, result):
+            with ledger_transaction(store, result, **PROVENANCE):
                 pass  # should not reach here
 
     def test_exception_inside_block_marks_record_failed(
@@ -313,39 +341,40 @@ class TestFailedParser:
         record_id: str | None = None
 
         with pytest.raises(RuntimeError, match="downstream write failed"):
-            with ledger_transaction(store, result) as record:
+            with ledger_transaction(store, result, **PROVENANCE) as record:
                 record_id = record.record_id
                 raise RuntimeError("downstream write failed")
 
         assert record_id is not None
         final = store.get(record_id)
         assert final.state is ArtifactState.FAILED
-        assert final.state is not ArtifactState.COMMITTED
+        assert final.state is not ArtifactState.SEALED
         assert "downstream write failed" in (final.error or "")
 
-    def test_failed_record_cannot_be_committed(
+    def test_failed_record_cannot_be_sealed(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         p = _write_artifact(artifact_dir, "r.json", "{}")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
         store.fail(record.record_id, error="something went wrong")
 
         with pytest.raises(InvalidStateTransitionError):
-            store.commit(record.record_id)
+            store.seal(record.record_id)
 
     def test_timed_out_sandbox_raises_before_record(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         result = _make_sandbox_result(artifact_dir, [], exit_code=-1, timed_out=True)
         with pytest.raises(SandboxFailedError):
-            with ledger_transaction(store, result):
+            with ledger_transaction(store, result, **PROVENANCE):
                 pass
 
 
 # ---------------------------------------------------------------------------
-# PASS 5 — Missing artifact cannot be committed
+# PASS 5 — Missing artifact cannot be sealed
 # ---------------------------------------------------------------------------
 
 class TestMissingArtifact:
@@ -357,6 +386,7 @@ class TestMissingArtifact:
         # do NOT create the file
         with pytest.raises(FileNotFoundError):
             store.create_pending(
+                **PROVENANCE,
                 run_id=str(uuid.uuid4()),
                 artifact_dir=artifact_dir,
                 artifact_paths=[ghost],
@@ -369,89 +399,116 @@ class TestMissingArtifact:
         outside.write_text("{}")
         with pytest.raises(ValueError, match="outside artifact_dir"):
             store.create_pending(
+                **PROVENANCE,
                 run_id=str(uuid.uuid4()),
                 artifact_dir=artifact_dir,
                 artifact_paths=[outside],
             )
 
-    def test_artifact_deleted_after_pending_blocks_commit(
+    def test_artifact_deleted_after_pending_blocks_seal(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         p = _write_artifact(artifact_dir, "r.json", "{}")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
         p.unlink()  # delete the file after pending is created
 
         with pytest.raises(MissingArtifactError):
-            store.commit(record.record_id)
+            store.seal(record.record_id)
 
-        # Record must remain PENDING, not committed
+        # Record must remain PENDING, not sealed
         assert store.get(record.record_id).state is ArtifactState.PENDING
 
 
 # ---------------------------------------------------------------------------
-# PASS 6 — Duplicate artifact hash is idempotent or rejected explicitly
+# PASS 6 — Identical output from separate runs keeps separate records
 # ---------------------------------------------------------------------------
 
-class TestDuplicateArtifactHash:
+class TestPerRunRecords:
 
-    def test_duplicate_raises_by_default(
-        self, store: LedgerStore, artifact_dir: Path, tmp_path: Path
-    ) -> None:
+    def _identical_runs(self, store: LedgerStore, artifact_dir: Path, tmp_path: Path):
         content = "deterministic parse output"
         p1 = _write_artifact(artifact_dir, "r.json", content)
-        store.create_pending(
-            run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p1]
-        )
-
-        # Second artifact_dir with identical content → same artifact_hash
         dir2 = tmp_path / "artifacts2"
         dir2.mkdir()
         p2 = _write_artifact(dir2, "r.json", content)
+        r1 = store.create_pending(
+            **PROVENANCE, run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p1]
+        )
+        r2 = store.create_pending(
+            **PROVENANCE, run_id=str(uuid.uuid4()), artifact_dir=dir2, artifact_paths=[p2]
+        )
+        return r1, r2
 
-        with pytest.raises(DuplicateArtifactError):
-            store.create_pending(
-                run_id=str(uuid.uuid4()), artifact_dir=dir2, artifact_paths=[p2]
-            )
-
-    def test_duplicate_ignore_returns_existing_record(
+    def test_identical_output_gets_its_own_record(
         self, store: LedgerStore, artifact_dir: Path, tmp_path: Path
     ) -> None:
-        content = "same parse output"
-        p1 = _write_artifact(artifact_dir, "r.json", content)
-        original = store.create_pending(
-            run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p1]
+        r1, r2 = self._identical_runs(store, artifact_dir, tmp_path)
+
+        assert r1.record_id != r2.record_id
+        assert r1.run_id != r2.run_id
+        assert r1.artifact_hash == r2.artifact_hash
+        assert {r.record_id for r in store.find_by_artifact_hash(r1.artifact_hash)} == {
+            r1.record_id, r2.record_id
+        }
+
+    def test_identical_output_is_archived_once_and_both_seal(
+        self, store: LedgerStore, artifact_dir: Path, tmp_path: Path
+    ) -> None:
+        r1, r2 = self._identical_runs(store, artifact_dir, tmp_path)
+        store.seal(r1.record_id)
+        store.seal(r2.record_id)
+
+        [digest] = r1.artifact_manifest.values()
+        blob_files = [p for p in (store.archive.root / "blobs").rglob("*") if p.is_file()]
+        # One content blob plus one tree object, shared by both runs.
+        assert sorted(p.name for p in blob_files) == sorted(
+            [digest[2:], r1.artifact_hash[2:]]
         )
+        assert store.get(r1.record_id).state is ArtifactState.SEALED
+        assert store.get(r2.record_id).state is ArtifactState.SEALED
 
-        dir2 = tmp_path / "artifacts2"
-        dir2.mkdir()
-        p2 = _write_artifact(dir2, "r.json", content)
+    def test_an_earlier_run_state_never_leaks_into_a_new_run(
+        self, store: LedgerStore, artifact_dir: Path, tmp_path: Path
+    ) -> None:
+        """Pre-#12, a duplicate got back the old record, even a FAILED one."""
+        r1, r2 = self._identical_runs(store, artifact_dir, tmp_path)
+        store.fail(r1.record_id, "first run's downstream failed")
 
-        returned = store.create_pending(
-            run_id=str(uuid.uuid4()),
-            artifact_dir=dir2,
-            artifact_paths=[p2],
-            duplicate_policy="ignore",
+        assert store.get(r2.record_id).state is ArtifactState.PENDING
+        assert store.seal(r2.record_id).state is ArtifactState.SEALED
+        assert store.get(r1.record_id).state is ArtifactState.FAILED
+
+    def test_second_record_for_the_same_run_is_refused(
+        self, store: LedgerStore, artifact_dir: Path
+    ) -> None:
+        run_id = str(uuid.uuid4())
+        p1 = _write_artifact(artifact_dir, "a.json", "a")
+        p2 = _write_artifact(artifact_dir, "b.json", "b")
+        first = store.create_pending(
+            **PROVENANCE, run_id=run_id, artifact_dir=artifact_dir, artifact_paths=[p1]
         )
-
-        # Same record returned, not a new one
-        assert returned.record_id == original.record_id
-        assert returned.artifact_hash == original.artifact_hash
+        with pytest.raises(DuplicateRunError, match=first.record_id):
+            store.create_pending(
+                **PROVENANCE, run_id=run_id, artifact_dir=artifact_dir, artifact_paths=[p2]
+            )
+        assert store.get_by_run_id(run_id) == first
 
     def test_different_content_different_records(
         self, store: LedgerStore, artifact_dir: Path, tmp_path: Path
     ) -> None:
         p1 = _write_artifact(artifact_dir, "r.json", "output version A")
         r1 = store.create_pending(
-            run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p1]
+            **PROVENANCE, run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p1]
         )
 
         dir2 = tmp_path / "artifacts2"
         dir2.mkdir()
         p2 = _write_artifact(dir2, "r.json", "output version B")
         r2 = store.create_pending(
-            run_id=str(uuid.uuid4()), artifact_dir=dir2, artifact_paths=[p2]
+            **PROVENANCE, run_id=str(uuid.uuid4()), artifact_dir=dir2, artifact_paths=[p2]
         )
 
         assert r1.record_id != r2.record_id

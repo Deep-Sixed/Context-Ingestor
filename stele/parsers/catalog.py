@@ -1,7 +1,19 @@
 """The packaged parsers Stele knows how to build and run."""
 from __future__ import annotations
 
+from ..replay.policy import JsonTolerancePolicy
 from . import ParserImage
+
+# Replay policy for the packaged ML parsers (roadmap #14). The parsers run on
+# the CPU with capped thread pools, but BLAS/onnxruntime reduction order can
+# still move a float in its last digits between runs. Coordinates are in PDF
+# points or pixels: half a unit absorbs that noise, anything larger is a real
+# layout change. Text (Markdown, strings in JSON) must match exactly, and so
+# must every other file. "device" in stele-parser.json is where the run
+# happened, not what it extracted.
+ML_REPLAY_POLICY = JsonTolerancePolicy(
+    rel_tol=1e-6, abs_tol=0.5, ignore_keys=frozenset({"device"}),
+)
 
 MINERU = ParserImage(
     name="mineru",
@@ -19,6 +31,7 @@ MINERU = ParserImage(
     cpus=2.0,
     tmpfs_size="2g",
     timeout_seconds=1800,
+    comparison=ML_REPLAY_POLICY,
 )
 
 MARKER = ParserImage(
@@ -38,6 +51,7 @@ MARKER = ParserImage(
     pids_limit=2048,
     tmpfs_size="2g",
     timeout_seconds=1800,
+    comparison=ML_REPLAY_POLICY,
 )
 
 DOCLING = ParserImage(
@@ -52,6 +66,7 @@ DOCLING = ParserImage(
     cpus=2.0,
     tmpfs_size="2g",
     timeout_seconds=1800,
+    comparison=ML_REPLAY_POLICY,
 )
 
 PARSERS: dict[str, ParserImage] = {p.name: p for p in (MINERU, MARKER, DOCLING)}

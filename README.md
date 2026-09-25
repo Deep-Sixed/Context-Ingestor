@@ -36,6 +36,28 @@ Stele adapter contract (Phase H) and the Dispatcher write path.
 **99 Stele tests** in this repo. RAG×Stele integration tests (31) remain in
 `EVECOR/DataCore/RAG/` until adapters move with cutover.
 
+**Ledger redesign (#12), after v1.0:** records are per run, and a record is
+`sealed` once its bundle is stored in the evidence archive and verified.
+Sealed is not delivered, which replaces v1.0's `committed`. Each record
+stores its input Snapshot digest and its parser identity and config. The
+ledger API changed accordingly (`LedgerStore(db, archive)`, `seal()`,
+`record_run()`). Existing ledgers migrate on open. See `docs/F-ledger.md`.
+
+**Durable dispatch (#13):** the Dispatcher delivers only sealed records and
+checks this against the live ledger. Adapters read verified bytes from the
+archive (`SealedBundle`), never files. Each write has a durable intent and a
+receipt or failure in an append-only delivery log. Writers get a `dispatch_id`
+idempotency key. `Dispatcher.invalidate()` removes a record's delivered data
+and records a receipt for each removal. See `docs/H-adapter.md`.
+
+**Replay (#14):** replay re-runs a record's parser at its recorded identity,
+with its recorded config, on its recorded input Snapshot. Each replay is
+reported as exactly one of `REPRODUCED`, `EQUIVALENT` (under the parser's
+comparison policy), `DIVERGED` or `UNREPLAYABLE`, and logged. Validation (the
+re-hash of working copies) is a separate operation. A frozen-Snapshot harness
+proves the Wasm extractor reproduces byte for byte on Linux, macOS and
+Windows. See `docs/G-replay.md`.
+
 ## Gate
 
 **RAG-ANYTHING: PROCEED — Stele-gated ingestion with scoped tombstone support.**

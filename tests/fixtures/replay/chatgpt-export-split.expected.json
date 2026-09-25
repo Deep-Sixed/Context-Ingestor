@@ -1,0 +1,15 @@
+{
+  "artifact_hash": "80064601c9c22f8643790d4f5b593924e16ec80792a8a3c7ef9274c019c8f7d7",
+  "artifact_manifest": {
+    "conversation-000000.json": "33c9868a1ee9ce1a9038e28aa2a771056da8cde77a688011c50e2c48bcbe703f",
+    "conversation-000001.json": "53561d9a6b93d9af3acb9a9269dc9ed4b56b40a13719633ca2c604df0df69e12",
+    "conversation-000002.json": "aeed17c3d4cfdbb63a6dde0a35ee788a4e899d62cef726fb321179eae1c94949",
+    "index.jsonl": "5f3af44d59ba247dfdf82a2f0a4d2312575bd200f8ca58775bb7196087084300"
+  },
+  "input_sha256": "908ef7397dc689274e6df222c7c47a9b6bd2038e3b439d4230fe66a114dc0ae5",
+  "parser": {
+    "module_sha256": "130e2b7205bff0fd92452a0037a1b04fd77fe1d83672b807096411fef11ef00e",
+    "name": "chatgpt-export-split",
+    "version": "1"
+  }
+}

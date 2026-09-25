@@ -3,7 +3,7 @@ Phase H adapter contract proof tests.
 
 Seven required proofs:
 
-  PASS 1 — Committed artifact can be passed to adapter
+  PASS 1 — Sealed artifact can be passed to adapter
   PASS 2 — Adapter returns typed SteleChunk records
   PASS 3 — Invalid adapter output is rejected
   PASS 4 — Adapter cannot bypass dispatcher write path
@@ -22,13 +22,13 @@ import inspect
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from stele.contracts.adapter import (
     ChunkValidationError,
     LightRAGTarget,
+    SealedBundle,
     SteleAdapter,
     SteleChunk,
     SteleTarget,
@@ -36,13 +36,12 @@ from stele.contracts.adapter import (
     validate_chunks,
 )
 from stele.contracts.dispatcher import (
-    DispatchResult,
     Dispatcher,
-    TargetWriter,
-    UnregisteredTargetError,
 )
+from stele.ledger.delivery import DeliveryStatus
 from stele.ledger.models import ArtifactRecord, ArtifactState
 from stele.ledger.store import LedgerStore
+from tests.ledger_helpers import PROVENANCE, open_ledger
 
 
 # ---------------------------------------------------------------------------
@@ -55,22 +54,17 @@ class FakeAdapter:
     def __init__(self, chunks: list[SteleChunk] | None = None) -> None:
         self._chunks = chunks  # if set, return these; otherwise derive from record
 
-    def transform(self, record: ArtifactRecord) -> list[SteleChunk]:
+    def transform(self, bundle: SealedBundle) -> list[SteleChunk]:
         if self._chunks is not None:
             return self._chunks
-        artifact_dir = Path(record.artifact_dir)
         result = []
-        for rel_path in sorted(record.artifact_manifest):
-            content = (artifact_dir / rel_path).read_text()
+        for rel_path in bundle.paths():
             result.append(make_chunk(
                 chunk_id=f"chunk:{rel_path}",
-                content=content,
-                source_record_id=record.record_id,
+                content=bundle.read_text(rel_path),
+                source_record_id=bundle.record_id,
             ))
         return result
-
-    def on_invalidation(self, run_id: uuid.UUID, reason: str) -> None:
-        pass  # no-op stub
 
 
 @dataclass
@@ -84,11 +78,16 @@ class CapturingWriter:
         if self.received_chunks is None:
             self.received_chunks = []
 
-    def write_chunks(self, chunks: list[SteleChunk], target: SteleTarget) -> None:
+    def write_chunks(
+        self, chunks: list[SteleChunk], target: SteleTarget, *, dispatch_id: str
+    ) -> None:
         if self.should_fail:
             raise RuntimeError("simulated target write failure")
         self.received_chunks.extend(chunks)
         self.received_target = target
+
+    def remove_delivery(self, target: SteleTarget, *, dispatch_id: str) -> int:
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +96,7 @@ class CapturingWriter:
 
 @pytest.fixture
 def store(tmp_path: Path) -> LedgerStore:
-    return LedgerStore(tmp_path / "ledger.db")
+    return open_ledger(tmp_path / "ledger.db")
 
 
 @pytest.fixture
@@ -107,38 +106,39 @@ def artifact_dir(tmp_path: Path) -> Path:
     return d
 
 
-def _commit_record(
+def _sealed_record(
     store: LedgerStore, artifact_dir: Path, content: str = '{"chunks": ["hello world"]}'
 ) -> ArtifactRecord:
     p = artifact_dir / f"out_{uuid.uuid4().hex[:8]}.json"
     p.write_text(content)
     record = store.create_pending(
+        **PROVENANCE,
         run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
     )
-    store.commit(record.record_id)
+    store.seal(record.record_id)
     return store.get(record.record_id)
 
 
-def _dispatcher_with_writer() -> tuple[Dispatcher, CapturingWriter]:
-    dispatcher = Dispatcher()
+def _dispatcher_with_writer(store: LedgerStore) -> tuple[Dispatcher, CapturingWriter]:
+    dispatcher = Dispatcher(store)
     writer = CapturingWriter()
     dispatcher.register_target(LightRAGTarget, writer)
     return dispatcher, writer
 
 
 # ---------------------------------------------------------------------------
-# PASS 1 — Committed artifact can be passed to adapter
+# PASS 1 — Sealed artifact can be passed to adapter
 # ---------------------------------------------------------------------------
 
-class TestAdapterReceivesCommittedRecord:
+class TestAdapterReceivesSealedRecord:
 
-    def test_adapter_called_with_committed_record(
+    def test_adapter_called_with_sealed_record(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        assert record.state is ArtifactState.COMMITTED
+        record = _sealed_record(store, artifact_dir)
+        assert record.state is ArtifactState.SEALED
 
-        dispatcher, _ = _dispatcher_with_writer()
+        dispatcher, _ = _dispatcher_with_writer(store)
         result = dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("default"))
 
         assert result.status == "success"
@@ -147,8 +147,8 @@ class TestAdapterReceivesCommittedRecord:
     def test_dispatch_result_links_to_record(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        dispatcher, _ = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, _ = _dispatcher_with_writer(store)
         result = dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("test"))
 
         assert result.record_id == record.record_id
@@ -164,8 +164,8 @@ class TestAdapterReturnsTypedChunks:
     def test_chunks_are_stele_chunk_instances(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        dispatcher, writer = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, writer = _dispatcher_with_writer(store)
         result = dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("default"))
 
         assert result.status == "success"
@@ -175,8 +175,8 @@ class TestAdapterReturnsTypedChunks:
     def test_chunk_content_hash_matches_content(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        dispatcher, writer = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, writer = _dispatcher_with_writer(store)
         dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("default"))
 
         for chunk in writer.received_chunks:
@@ -188,8 +188,8 @@ class TestAdapterReturnsTypedChunks:
     def test_chunk_metadata_preserved(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        dispatcher, writer = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, writer = _dispatcher_with_writer(store)
         dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("default"))
 
         for chunk in writer.received_chunks:
@@ -206,9 +206,9 @@ class TestInvalidAdapterOutputRejected:
     def test_empty_chunk_list_rejected(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
+        record = _sealed_record(store, artifact_dir)
         adapter = FakeAdapter(chunks=[])
-        dispatcher, writer = _dispatcher_with_writer()
+        dispatcher, writer = _dispatcher_with_writer(store)
 
         result = dispatcher.dispatch(adapter, record, LightRAGTarget("default"))
         assert result.status == "failed"
@@ -218,7 +218,7 @@ class TestInvalidAdapterOutputRejected:
     def test_wrong_content_hash_rejected(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
+        record = _sealed_record(store, artifact_dir)
         bad_chunk = SteleChunk(
             chunk_id="c1",
             content="real content",
@@ -226,7 +226,7 @@ class TestInvalidAdapterOutputRejected:
             token_count=2,
         )
         adapter = FakeAdapter(chunks=[bad_chunk])
-        dispatcher, writer = _dispatcher_with_writer()
+        dispatcher, writer = _dispatcher_with_writer(store)
 
         result = dispatcher.dispatch(adapter, record, LightRAGTarget("default"))
         assert result.status == "failed"
@@ -236,10 +236,10 @@ class TestInvalidAdapterOutputRejected:
     def test_duplicate_chunk_ids_rejected(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
+        record = _sealed_record(store, artifact_dir)
         chunks = [make_chunk("same-id", "content A"), make_chunk("same-id", "content B")]
         adapter = FakeAdapter(chunks=chunks)
-        dispatcher, writer = _dispatcher_with_writer()
+        dispatcher, writer = _dispatcher_with_writer(store)
 
         result = dispatcher.dispatch(adapter, record, LightRAGTarget("default"))
         assert result.status == "failed"
@@ -270,10 +270,12 @@ class TestAdapterCannotBypassDispatcher:
             for name, obj in inspect.getmembers(SteleAdapter)
             if not name.startswith("_")
         }
-        # Only transform and on_invalidation — no write_chunks, no db, no target
+        # Only transform — no write_chunks, no removal hook, no db, no target
         assert "transform" in members
-        assert "on_invalidation" in members
-        forbidden = {"write_chunks", "write", "db", "connection", "conn", "target"}
+        forbidden = {
+            "write_chunks", "write", "db", "connection", "conn", "target",
+            "on_invalidation", "remove_delivery",
+        }
         assert not (set(members) & forbidden), (
             f"SteleAdapter Protocol has unexpected write-path members: "
             f"{set(members) & forbidden}"
@@ -283,9 +285,9 @@ class TestAdapterCannotBypassDispatcher:
         """transform() must not accept a target or writer parameter."""
         sig = inspect.signature(FakeAdapter.transform)
         param_names = set(sig.parameters) - {"self"}
-        # Only 'record' is allowed
-        assert param_names == {"record"}, (
-            f"transform() must accept only 'record', got: {param_names}"
+        # Only the sealed bundle is allowed
+        assert param_names == {"bundle"}, (
+            f"transform() must accept only 'bundle', got: {param_names}"
         )
 
     def test_side_channel_write_produces_no_dispatch_result(
@@ -295,16 +297,13 @@ class TestAdapterCannotBypassDispatcher:
         side_channel: list[str] = []
 
         class SideChannelAdapter:
-            def transform(self, record: ArtifactRecord) -> list[SteleChunk]:
+            def transform(self, bundle: SealedBundle) -> list[SteleChunk]:
                 # Simulate direct write attempt via side channel
-                side_channel.append(f"direct_write:{record.record_id}")
+                side_channel.append(f"direct_write:{bundle.record_id}")
                 return [make_chunk("c1", "content")]
 
-            def on_invalidation(self, run_id: Any, reason: str) -> None:
-                pass
-
-        record = _commit_record(store, artifact_dir)
-        dispatcher, writer = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, writer = _dispatcher_with_writer(store)
         result = dispatcher.dispatch(SideChannelAdapter(), record, LightRAGTarget("default"))
 
         # Side channel was written (can't prevent in Python), but:
@@ -322,8 +321,8 @@ class TestAdapterCannotBypassDispatcher:
         """Dispatching to an unregistered target fails without calling any writer."""
         from stele.contracts.adapter import HindsightTarget
 
-        record = _commit_record(store, artifact_dir)
-        dispatcher = Dispatcher()  # no writers registered
+        record = _sealed_record(store, artifact_dir)
+        dispatcher = Dispatcher(store)  # no writers registered
         result = dispatcher.dispatch(
             FakeAdapter(), record, HindsightTarget("jarvis")
         )
@@ -340,8 +339,8 @@ class TestTargetWritesAsResults:
     def test_successful_dispatch_records_chunk_count(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        dispatcher, writer = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, writer = _dispatcher_with_writer(store)
         result = dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("ws1"))
 
         assert result.status == "success"
@@ -351,8 +350,8 @@ class TestTargetWritesAsResults:
     def test_target_receives_correct_workspace(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        dispatcher, writer = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, writer = _dispatcher_with_writer(store)
         target = LightRAGTarget(workspace="my-workspace")
         dispatcher.dispatch(FakeAdapter(), record, target)
 
@@ -362,9 +361,9 @@ class TestTargetWritesAsResults:
     def test_failed_dispatch_has_zero_chunks_submitted(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
+        record = _sealed_record(store, artifact_dir)
         adapter = FakeAdapter(chunks=[])  # will fail validation
-        dispatcher, _ = _dispatcher_with_writer()
+        dispatcher, _ = _dispatcher_with_writer(store)
         result = dispatcher.dispatch(adapter, record, LightRAGTarget("default"))
 
         assert result.status == "failed"
@@ -377,31 +376,29 @@ class TestTargetWritesAsResults:
 
 class TestAdapterFailureIsolation:
 
-    def test_adapter_transform_exception_leaves_record_committed(
+    def test_adapter_transform_exception_leaves_record_sealed(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         class CrashingAdapter:
-            def transform(self, record: ArtifactRecord) -> list[SteleChunk]:
+            def transform(self, bundle: SealedBundle) -> list[SteleChunk]:
                 raise RuntimeError("parse error inside adapter")
-            def on_invalidation(self, run_id: Any, reason: str) -> None:
-                pass
 
-        record = _commit_record(store, artifact_dir)
-        dispatcher, _ = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, _ = _dispatcher_with_writer(store)
         result = dispatcher.dispatch(CrashingAdapter(), record, LightRAGTarget("default"))
 
         assert result.status == "failed"
         # Artifact record is unmodified in the ledger
         refetched = store.get(record.record_id)
-        assert refetched.state is ArtifactState.COMMITTED, (
+        assert refetched.state is ArtifactState.SEALED, (
             "adapter failure must not automatically invalidate the artifact record"
         )
 
-    def test_target_write_failure_leaves_record_committed(
-        self, store: LedverStore, artifact_dir: Path
+    def test_target_write_failure_leaves_record_sealed(
+        self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        dispatcher = Dispatcher()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher = Dispatcher(store)
         failing_writer = CapturingWriter(should_fail=True)
         dispatcher.register_target(LightRAGTarget, failing_writer)
 
@@ -410,7 +407,7 @@ class TestAdapterFailureIsolation:
         assert result.status == "failed"
         assert "simulated target write failure" in (result.error or "")
         refetched = store.get(record.record_id)
-        assert refetched.state is ArtifactState.COMMITTED
+        assert refetched.state is ArtifactState.SEALED
 
     def test_caller_must_explicitly_invalidate_after_failure(
         self, store: LedgerStore, artifact_dir: Path
@@ -418,13 +415,13 @@ class TestAdapterFailureIsolation:
         """Invalidation after dispatch failure is the caller's decision, not automatic."""
         from stele.replay.invalidation import InvalidationReason, invalidate_record
 
-        record = _commit_record(store, artifact_dir)
-        dispatcher = Dispatcher()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher = Dispatcher(store)
         dispatcher.register_target(LightRAGTarget, CapturingWriter(should_fail=True))
         result = dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("default"))
 
         assert result.status == "failed"
-        assert store.get(record.record_id).state is ArtifactState.COMMITTED
+        assert store.get(record.record_id).state is ArtifactState.SEALED
 
         # Caller explicitly decides to invalidate
         invalidated = invalidate_record(
@@ -443,33 +440,33 @@ class TestDispatchLog:
     def test_successful_dispatch_in_log(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        dispatcher, _ = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, _ = _dispatcher_with_writer(store)
         result = dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("default"))
 
         log = dispatcher.dispatch_log()
         assert len(log) == 1
         assert log[0].dispatch_id == result.dispatch_id
-        assert log[0].status == "success"
+        assert log[0].status is DeliveryStatus.DELIVERED
 
     def test_failed_dispatch_in_log(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
+        record = _sealed_record(store, artifact_dir)
         adapter = FakeAdapter(chunks=[])  # fails validation
-        dispatcher, _ = _dispatcher_with_writer()
+        dispatcher, _ = _dispatcher_with_writer(store)
         dispatcher.dispatch(adapter, record, LightRAGTarget("default"))
 
         log = dispatcher.dispatch_log()
         assert len(log) == 1
-        assert log[0].status == "failed"
+        assert log[0].status is DeliveryStatus.FAILED
 
     def test_dispatch_log_is_separate_from_ledger(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         """DispatchResult.dispatch_id must differ from the artifact record_id."""
-        record = _commit_record(store, artifact_dir)
-        dispatcher, _ = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, _ = _dispatcher_with_writer(store)
         result = dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("default"))
 
         assert result.dispatch_id != record.record_id
@@ -478,8 +475,8 @@ class TestDispatchLog:
     def test_multiple_dispatches_for_same_record_all_logged(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record = _commit_record(store, artifact_dir)
-        dispatcher, _ = _dispatcher_with_writer()
+        record = _sealed_record(store, artifact_dir)
+        dispatcher, _ = _dispatcher_with_writer(store)
 
         r1 = dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("ws-a"))
         r2 = dispatcher.dispatch(FakeAdapter(), record, LightRAGTarget("ws-b"))
@@ -495,10 +492,10 @@ class TestDispatchLog:
     ) -> None:
         dir2 = tmp_path / "art2"
         dir2.mkdir()
-        r1 = _commit_record(store, artifact_dir, '{"a": 1}')
-        r2 = _commit_record(store, dir2, '{"b": 2}')
+        r1 = _sealed_record(store, artifact_dir, '{"a": 1}')
+        r2 = _sealed_record(store, dir2, '{"b": 2}')
 
-        dispatcher, _ = _dispatcher_with_writer()
+        dispatcher, _ = _dispatcher_with_writer(store)
         dispatcher.dispatch(FakeAdapter(), r1, LightRAGTarget("ws"))
         dispatcher.dispatch(FakeAdapter(), r2, LightRAGTarget("ws"))
 

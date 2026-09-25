@@ -283,7 +283,7 @@ Landlock: writes only under `/stele/output`, exec only of allowlisted programs, 
 - [x] untrusted input symlinks/non-regular files refused before sandbox bind; copied and hashed from one `O_NOFOLLOW` descriptor
 - [x] parser-created symlink/non-regular output refused before it can reach the ledger
 - [x] network namespace proof sees only loopback inside the parser sandbox
-- [x] artifact/input opens use `O_NONBLOCK`, so a parser-planted FIFO is rejected instead of hanging hashing, commit, or replay
+- [x] artifact/input opens use `O_NONBLOCK`, so a parser-planted FIFO is rejected instead of hanging hashing, sealing, or replay
 - [x] seccomp filter kills blocked syscalls and non-native ABIs; violation reported in the run result
 - [x] Landlock refuses writes outside `/stele/output` and exec outside the allowlist
 - [x] Phase F staging path: `artifact_dir` (caller-supplied); ledger schema TBD in Phase F
