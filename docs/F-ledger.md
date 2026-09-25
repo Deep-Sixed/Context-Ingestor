@@ -39,8 +39,12 @@ This is the one definition of ledger states. Other docs and code link here.
 
 - **Sealed is integrity, not delivery.** A sealed record says nothing about
   whether any downstream target has received it. Delivery is a separate set
-  of facts: an intent, then a receipt or a failure, recorded per target by
-  durable dispatch (#13). A delivery failure never changes the ledger state.
+  of facts in the same database: an intent, then a receipt or a failure,
+  per target, in the append-only delivery log (see
+  [H-adapter.md](H-adapter.md#dispatcher-and-the-delivery-log)). A delivery
+  failure never changes the ledger state.
+- **Only sealed records are delivered**, and invalidating one removes what it
+  delivered (`Dispatcher.invalidate`).
 - **Transitions are conditional.** Each transition is one `UPDATE … WHERE
   state IN (…)`, so a transition that raced another (e.g. a seal racing an
   invalidation) fails with `InvalidStateTransitionError` instead of
@@ -128,9 +132,10 @@ In each case the record stays `pending` (and `ledger_transaction` marks it
 ## Storage and migration
 
 SQLite in WAL mode, with a schema that maps 1:1 to Postgres. The schema
-version is `PRAGMA user_version` (currently 2). Opening a ledger of an older
-version migrates it in one write transaction (`stele/ledger/migration.py`):
-either the migration completes or the database is left unchanged.
+version is `PRAGMA user_version` (currently 3: records, plus the delivery log
+added by #13). Opening a ledger of an older version migrates it in one write
+transaction (`stele/ledger/migration.py`): either the migration completes or
+the database is left unchanged. Version 2 → 3 only adds the delivery log.
 
 Migrating a pre-#12 (version 0) ledger:
 
@@ -154,7 +159,8 @@ raises `LedgerSchemaError`.
 - `stele/ledger/hashing.py` — `sha256_file`, `sha256_manifest`, `build_manifest`
 - `stele/ledger/store.py` — `LedgerStore` (SQLite, WAL mode)
 - `stele/ledger/transaction.py` — `ledger_transaction`, `record_run`
-- `stele/ledger/migration.py` — migration from schema version 0
+- `stele/ledger/migration.py` — migration from schema versions 0 and 2
+- `stele/ledger/delivery.py` — the delivery log (#13)
 - `tests/test_phase_f_ledger.py` — state machine, hashing, per-run records
 - `tests/test_ledger_provenance.py` — Snapshot provenance, parser identity, sealing, migration
 

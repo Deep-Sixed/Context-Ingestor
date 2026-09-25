@@ -43,6 +43,13 @@ stores its input Snapshot digest and its parser identity and config. The
 ledger API changed accordingly (`LedgerStore(db, archive)`, `seal()`,
 `record_run()`). Existing ledgers migrate on open. See `docs/F-ledger.md`.
 
+**Durable dispatch (#13):** the Dispatcher delivers only sealed records and
+checks this against the live ledger. Adapters read verified bytes from the
+archive (`SealedBundle`), never files. Each write has a durable intent and a
+receipt or failure in an append-only delivery log. Writers get a `dispatch_id`
+idempotency key. `Dispatcher.invalidate()` removes a record's delivered data
+and records a receipt for each removal. See `docs/H-adapter.md`.
+
 ## Gate
 
 **RAG-ANYTHING: PROCEED — Stele-gated ingestion with scoped tombstone support.**

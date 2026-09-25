@@ -1,5 +1,9 @@
 """
-Migrating a pre-#12 ledger (schema version 0) to the current schema.
+Migrating older ledgers to the current schema.
+
+Version 2 (#12) → 3 (#13) only adds the delivery log tables.
+
+Version 0 is a pre-#12 ledger.
 
 A version-0 ledger allowed one record per artifact_hash, meant "delivered
 downstream" by COMMITTED, trusted a caller-supplied source_hash, and stored no
@@ -30,6 +34,8 @@ from ..archive.records import SnapshotKind, Source
 from ..archive.store import ArchiveError, BlobStore
 from .hashing import UnsafeFileError
 from .store import (
+    DELIVERY_DDL,
+    SCHEMA_VERSION,
     ArtifactDriftError,
     MissingArtifactError,
     archive_bundle,
@@ -49,6 +55,11 @@ _V0_COLUMNS = {
 
 def migrate_to_current(conn: sqlite3.Connection, version: int, archive: BlobStore) -> None:
     """Migrate in place. The caller holds a BEGIN IMMEDIATE transaction."""
+    if version == 2:
+        for statement in DELIVERY_DDL:
+            conn.execute(statement)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        return
     if version != 0:
         raise LedgerMigrationError(f"no migration from ledger schema version {version}")
 

@@ -26,8 +26,9 @@ from .hashing import UnsafeFileError, build_manifest, sha256_manifest
 from .models import ArtifactRecord, ArtifactState, ParserIdentity
 
 # PRAGMA user_version of the current schema. 0 is a pre-#12 ledger (or an
-# empty database); see stele/ledger/migration.py.
-SCHEMA_VERSION = 2
+# empty database), 2 has records only, 3 adds the delivery log (#13); see
+# stele/ledger/migration.py.
+SCHEMA_VERSION = 3
 
 _DDL = (
     """
@@ -61,6 +62,55 @@ _DDL = (
     "CREATE INDEX idx_artifact_hash ON artifact_records(artifact_hash)",
     "CREATE INDEX idx_source_hash ON artifact_records(source_hash)",
     "CREATE INDEX idx_parser ON artifact_records(parser_name, parser_version)",
+)
+
+# The delivery log (roadmap #13, stele/ledger/delivery.py). A delivery is one
+# record sent to one target, identified by its dispatch_id, which writers use
+# as their idempotency key. What happened to it is an append-only sequence of
+# events; nothing in either table is ever updated or deleted.
+DELIVERY_DDL = (
+    """
+    CREATE TABLE deliveries (
+        dispatch_id  TEXT PRIMARY KEY,
+        record_id    TEXT NOT NULL REFERENCES artifact_records(record_id),
+        target_kind  TEXT NOT NULL,   -- target type name, e.g. LightRAGTarget
+        target       TEXT NOT NULL,   -- canonical JSON of the target's fields
+        created_at   TEXT NOT NULL,
+        UNIQUE (record_id, target_kind, target)
+    )
+    """,
+    """
+    CREATE TABLE delivery_events (
+        event_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        dispatch_id  TEXT NOT NULL REFERENCES deliveries(dispatch_id),
+        event        TEXT NOT NULL CHECK (event IN (
+                         'intent', 'receipt', 'failure',
+                         'removal_intent', 'removal_receipt', 'removal_failure')),
+        planned      INTEGER,   -- intent: chunks about to be written
+        chunks_digest TEXT,     -- intent: digest of the chunk ids and content hashes
+        done         INTEGER,   -- outcome: chunks written or removed; NULL = unknown
+        error        TEXT,
+        at           TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX idx_delivery_record ON deliveries(record_id)",
+    "CREATE INDEX idx_delivery_events ON delivery_events(dispatch_id, event_id)",
+    """
+    CREATE TRIGGER deliveries_append_only_u BEFORE UPDATE ON deliveries
+    BEGIN SELECT RAISE(ABORT, 'the delivery log is append-only'); END
+    """,
+    """
+    CREATE TRIGGER deliveries_append_only_d BEFORE DELETE ON deliveries
+    BEGIN SELECT RAISE(ABORT, 'the delivery log is append-only'); END
+    """,
+    """
+    CREATE TRIGGER delivery_events_append_only_u BEFORE UPDATE ON delivery_events
+    BEGIN SELECT RAISE(ABORT, 'the delivery log is append-only'); END
+    """,
+    """
+    CREATE TRIGGER delivery_events_append_only_d BEFORE DELETE ON delivery_events
+    BEGIN SELECT RAISE(ABORT, 'the delivery log is append-only'); END
+    """,
 )
 
 
@@ -147,9 +197,23 @@ def canonical_parser_config(parser_config: Mapping[str, Any]) -> str:
     return encoded
 
 
+def connect(db_path: Path) -> sqlite3.Connection:
+    """A connection to a ledger database.
+
+    Autocommit: single-statement writes commit on their own, and
+    multi-statement work (schema creation, migration, delivery events)
+    opens its own BEGIN IMMEDIATE. Foreign keys are enforced.
+    """
+    conn = sqlite3.connect(str(db_path), check_same_thread=False, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create the current schema. The caller holds the write transaction."""
-    for statement in _DDL:
+    for statement in (*_DDL, *DELIVERY_DDL):
         conn.execute(statement)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -220,15 +284,9 @@ class LedgerStore:
         if not isinstance(archive, BlobStore):
             raise TypeError("LedgerStore needs the BlobStore its records point into")
         self.archive = archive
-        db_path = Path(db_path)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        # Autocommit: every write below is one statement, and multi-statement
-        # work (schema creation, migration) opens its own BEGIN IMMEDIATE.
-        self._conn = sqlite3.connect(
-            str(db_path), check_same_thread=False, isolation_level=None
-        )
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = connect(self.db_path)
         self._open_schema()
 
     def _open_schema(self) -> None:

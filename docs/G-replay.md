@@ -30,9 +30,11 @@ The replay engine itself is roadmap #14.
 
 Given a `run_id` or `source_hash`:
 1. Mark ledger record `status = invalidated`
-2. Emit invalidation event to downstream subscribers (LightRAG, Hindsight)
-3. Downstream subscribers responsible for removing/tombstoning affected chunks
-4. Invalidation is non-destructive to the ledger itself — record is kept
+2. Remove or tombstone everything the record delivered, through the writer
+   that wrote it, with a receipt per delivery (`Dispatcher.invalidate`, or
+   `Dispatcher.retract_invalidated()` after the functions below, which only
+   touch the ledger; see [H-adapter.md](H-adapter.md#invalidation))
+3. Invalidation is non-destructive to the ledger itself — record is kept
 
 ## Views required
 

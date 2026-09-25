@@ -1,9 +1,10 @@
 """
 Stele Phase G — invalidation operations.
 
-Invalidation marks sealed (or pending) records as INVALIDATED so that
-Phase H adapters know to remove or tombstone the corresponding data from
-their target stores.
+Invalidation marks sealed (or pending) records as INVALIDATED. These
+functions touch the ledger only: the data a record delivered is removed by
+Dispatcher.invalidate(), or, after invalidating here, by
+Dispatcher.retract_invalidated().
 
 Invalidation is non-destructive: the ledger record and its metadata are
 preserved. Only the state transitions and the reason_note are written.
