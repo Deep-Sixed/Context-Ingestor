@@ -376,6 +376,50 @@ def test_backend_exception_removes_output_it_created(tmp_path: Path) -> None:
     assert not out.exists()
 
 
+def test_cleanup_error_does_not_hide_the_backend_error(tmp_path: Path, monkeypatch) -> None:
+    import stele.containment.runner as runner
+
+    class Exploding(_Plain):
+        def execute(self, config):
+            raise RuntimeError("engine vanished")
+
+    def failing_cleanup(artifact_dir, created):
+        raise PermissionError("cannot remove output")
+
+    monkeypatch.setattr(runner, "_remove_output", failing_cleanup)
+    with pytest.raises(RuntimeError, match="engine vanished"):
+        run_in_sandbox(SandboxConfig(command=["x"], artifact_dir=tmp_path / "out"),
+                       backend=Exploding(ExecutionOutcome(0, "", "", 0)))
+
+
+class _Symlinking(_Plain):
+    """Exits 0 after writing a symlink: an unsafe-output failure."""
+
+    def execute(self, config):
+        config.artifact_dir.mkdir(parents=True, exist_ok=True)
+        os.symlink("/etc/hostname", config.artifact_dir / "link")
+        return self.outcome
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt", reason="needs POSIX symlinks")
+def test_cli_exits_nonzero_for_a_failed_run_with_exit_code_0(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import stele.containment.runner as runner
+
+    real = runner.run_in_sandbox
+    monkeypatch.setattr(runner, "run_in_sandbox", lambda config, **kw: real(
+        config, backend=_Symlinking(ExecutionOutcome(0, "", "", 0.1))
+    ))
+    monkeypatch.setattr(sys, "argv", ["runner", "--artifact-dir", str(tmp_path / "o"), "--", "x"])
+    with pytest.raises(SystemExit) as info:
+        runner._main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["exit_code"] == 0 and report["failure"]["reason"] == "unsafe_artifact"
+    assert info.value.code == 1
+
+
 def test_cli_reports_failure_and_telemetry(tmp_path: Path) -> None:
     if WasmtimeBackend().available() is False:
         pytest.skip("wasmtime not installed")

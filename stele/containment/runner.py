@@ -143,7 +143,10 @@ def run_in_sandbox(
         try:
             outcome = chosen.execute(runtime_config)
         except BaseException:
-            _remove_output(config.artifact_dir, created_artifact_dir)
+            try:
+                _remove_output(config.artifact_dir, created_artifact_dir)
+            except Exception:
+                pass  # the execute() error is the one callers need to see
             raise
     finally:
         if staging is not None:
@@ -305,7 +308,8 @@ def _main() -> None:
         "stderr": result.stderr,
     }, indent=2))
 
-    sys.exit(result.exit_code)
+    # A run can fail with exit code 0 (e.g. unsafe output); never report that as success.
+    sys.exit(0 if result.succeeded else (result.exit_code or 1))
 
 
 if __name__ == "__main__":

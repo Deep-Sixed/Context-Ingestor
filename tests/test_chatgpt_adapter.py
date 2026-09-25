@@ -242,12 +242,23 @@ def test_deep_conversation_does_not_recurse(tmp_path) -> None:
     (lambda c: c["mapping"]["q1e"]["children"].append("a1"), "reached twice"),
     (lambda c: c.update(current_node="nope"), "current_node"),
     (lambda c: c.update(mapping=[]), "mapping is not an object"),
+    (lambda c: c["mapping"]["q1"].update(children="a1"), "children that are not a list"),
+    (lambda c: c.update(current_node=["a1r"]), "current_node"),
 ])
 def test_malformed_conversations_fail(tmp_path, mutate, message) -> None:
     conversation = json.loads(json.dumps(BRANCHED))
     mutate(conversation)
     with pytest.raises(MalformedExportError, match=message):
         ChatGPTExportAdapter().transform(_bundle(tmp_path, _export(conversation)))
+
+
+def test_non_object_nodes_and_ids_are_tolerated(tmp_path) -> None:
+    conversation = json.loads(json.dumps(BRANCHED))
+    conversation["mapping"]["stray"] = "x"                    # a node that is not an object
+    conversation["mapping"]["a2"]["parent"] = ["q1e"]         # a parent id that is not a string
+    conversation["mapping"]["q1e"]["children"] = [{"id": "a2"}]  # an id that is not a string
+    chunks = ChatGPTExportAdapter().transform(_bundle(tmp_path, _export(conversation)))
+    assert {c.metadata["node_id"] for c in chunks} >= {"q1", "a1", "a1r", "q1e", "a2"}
 
 
 def test_refuses_other_parsers_bundles(tmp_path) -> None:

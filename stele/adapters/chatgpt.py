@@ -108,18 +108,20 @@ def _conversation_chunks(
         raise MalformedExportError(f"{conv_id}: mapping is not an object")
     order = {node_id: i for i, node_id in enumerate(mapping)}
 
+    for node_id, node in mapping.items():
+        kids = node.get("children") if isinstance(node, dict) else None
+        if kids is not None and not isinstance(kids, list):
+            raise MalformedExportError(f"{conv_id}: node {node_id!r} has children that are not a list")
+
     def children_of(node_id: str) -> list[str]:
-        node = mapping.get(node_id) or {}
-        kids = node.get("children") or []
-        # Children the mapping does not contain are dangling references; skip them.
-        return [k for k in kids if k in mapping]
+        return _children(mapping, mapping.get(node_id))
 
     roots = [
         node_id for node_id, node in mapping.items()
-        if not isinstance(node, dict) or node.get("parent") not in mapping
+        if not isinstance(node, dict) or not _in_mapping(mapping, node.get("parent"))
     ]
     current = conversation.get("current_node")
-    if current is not None and current not in mapping:
+    if current is not None and not _in_mapping(mapping, current):
         raise MalformedExportError(f"{conv_id}: current_node {current!r} is not in the mapping")
     current_branch = _ancestors(mapping, current) if current is not None else set()
     leaves = [n for n in mapping if not children_of(n)]
@@ -193,7 +195,7 @@ def _conversation_chunks(
 def _ancestors(mapping: dict[str, Any], node_id: str) -> set[str]:
     """node_id and every ancestor, following parent links (cycle-safe)."""
     seen: set[str] = set()
-    while node_id is not None and node_id in mapping and node_id not in seen:
+    while _in_mapping(mapping, node_id) and node_id not in seen:
         seen.add(node_id)
         node = mapping[node_id]
         node_id = node.get("parent") if isinstance(node, dict) else None
@@ -201,10 +203,26 @@ def _ancestors(mapping: dict[str, Any], node_id: str) -> set[str]:
 
 
 def _sibling_count(mapping: dict[str, Any], node: dict[str, Any]) -> int:
-    parent = mapping.get(node.get("parent")) if node.get("parent") in mapping else None
+    parent = mapping.get(node.get("parent")) if _in_mapping(mapping, node.get("parent")) else None
     if not isinstance(parent, dict):
         return 1
-    return len([k for k in parent.get("children") or [] if k in mapping])
+    return len(_children(mapping, parent))
+
+
+def _in_mapping(mapping: dict[str, Any], node_id: Any) -> bool:
+    """True if node_id names a node (ids are strings; anything else never does)."""
+    return isinstance(node_id, str) and node_id in mapping
+
+
+def _children(mapping: dict[str, Any], node: Any) -> list[str]:
+    """A node's children that the mapping contains.
+
+    A node that is not an object has none. Children the mapping does not
+    contain are dangling references and are skipped. A non-list children
+    field is rejected up front by _conversation_chunks.
+    """
+    kids = node.get("children") if isinstance(node, dict) else None
+    return [k for k in kids or [] if _in_mapping(mapping, k)]
 
 
 def _render(message: dict[str, Any]) -> str:

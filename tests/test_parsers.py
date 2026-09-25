@@ -181,6 +181,20 @@ class TestRunParser:
         assert run.result.input_snapshot is not None
         assert run.result.input_snapshot.digest == run.result.input_sha256
 
+    @pytest.mark.skipif(os.name == "nt", reason="needs POSIX symlinks")
+    def test_unsafe_output_with_exit_code_0_is_a_failure(self, doc: Path, tmp_path: Path) -> None:
+        class Symlinking(FakeBackend):
+            def execute(self, config):
+                outcome = super().execute(config)
+                os.symlink("/etc/hostname", config.artifact_dir / "link")
+                return outcome
+
+        run = run_parser(PARSER, doc, tmp_path / "out", backend=Symlinking())
+        assert run.result.exit_code == 0
+        assert not run.succeeded
+        assert run.failure.startswith("unsafe_artifact: ")
+        assert run.result.artifact_paths == []
+
     def test_success_stores_the_bundle(self, doc: Path, tmp_path: Path) -> None:
         store = BlobStore(tmp_path / "store")
         run = run_parser(PARSER, doc, tmp_path / "out", store=store, backend=FakeBackend())
