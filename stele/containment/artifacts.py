@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from pathlib import Path
 
@@ -71,3 +72,37 @@ def collect_artifact_paths(artifact_dir: Path) -> list[Path]:
             artifacts.append(path)
 
     return sorted(artifacts, key=lambda path: str(path.relative_to(artifact_dir)))
+
+
+def discard_artifact_dir_contents(artifact_dir: Path) -> None:
+    """Delete everything a parser wrote below artifact_dir, keeping the directory.
+
+    Never follows symlinks: a symlink entry is unlinked, not its target, and
+    rmtree does not descend through links. A directory the parser made
+    unreadable is made accessible (it is ours again once the sandbox exits)
+    before removal.
+    """
+    artifact_dir = Path(artifact_dir)
+    try:
+        root_stat = os.lstat(artifact_dir)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise UnsafeArtifactError(f"artifact_dir is not a directory: {artifact_dir}")
+
+    def _retry_writable(func, path, _exc):  # noqa: ANN001 - rmtree onexc hook
+        parent = os.path.dirname(path)
+        for target in (parent, path):
+            try:
+                if not os.path.islink(target):
+                    os.chmod(target, 0o700)
+            except OSError:
+                pass
+        func(path)
+
+    os.chmod(artifact_dir, stat.S_IMODE(root_stat.st_mode) | 0o700)
+    for entry in os.scandir(artifact_dir):
+        if entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(entry.path, onexc=_retry_writable)
+        else:
+            os.unlink(entry.path)

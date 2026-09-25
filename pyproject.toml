@@ -20,3 +20,9 @@ packages = ["stele"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Real parser images are built in their own workflow (parser-images.yml),
+# which selects these tests with `-m parser_image`.
+addopts = "-m 'not parser_image'"
+markers = [
+    "parser_image: needs a locally built parser image (tests/test_parser_images.py)",
+]
