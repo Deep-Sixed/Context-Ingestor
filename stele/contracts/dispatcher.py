@@ -1,5 +1,5 @@
 """
-Stele Phase H — write dispatcher, with durable delivery (roadmap #13).
+Stele contracts — write dispatcher, with durable delivery (roadmap #13).
 
 The Dispatcher is the sole authorized path from adapter output to target
 stores, and from invalidation to the removal of what was written.

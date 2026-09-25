@@ -1,15 +1,13 @@
-# Phase E — bubblewrap Parser-Containment Gate
-
-**Status:** COMPLETE — 2026-06-26  
-**Unblocks:** Phase F
+# Parser Containment
 
 ## Goal
 
-Parser execution (RAG-ANYTHING, MinerU, Marker) must run inside an isolated
-execution context. Parsers may not:
+Parser execution (MinerU, Marker, Docling, or any other document parser) must
+run inside an isolated execution context. Parsers may not:
 - open arbitrary filesystem paths outside a designated input sandbox
 - make outbound network calls
-- write directly to any Hindsight, Graphify, LightRAG, or MetaRouter target
+- write directly to any downstream store (vector index, knowledge graph,
+  memory service, database)
 - spawn subprocesses without explicit allowlist
 
 ## Mechanism
@@ -123,7 +121,7 @@ Every run result records the backend that executed it (`SandboxResult.backend`)
 and the SHA-256 of the exact staged input bytes (`SandboxResult.input_sha256`;
 a manifest digest for directory inputs). Inputs may be a single regular file or
 a directory tree of regular files, staged by descriptor without following
-symlinks. The containment proofs in `tests/test_phase_e_containment.py` run once
+symlinks. The containment proofs in `tests/test_containment.py` run once
 per registered host-process backend; Wasm backends prove the same guarantees in
 `tests/test_wasm_backend.py`.
 
@@ -257,7 +255,7 @@ extractor's output digest is identical on Linux, macOS and Windows.
 - `stele/containment/landlock.py` — Landlock probe and in-sandbox launcher (write + exec rules)
 - `stele/containment/runner.py` — `run_in_sandbox()`, CLI entry point
 - `stele/containment/result.py` — `SandboxResult`
-- `tests/test_phase_e_containment.py` — 16 live/structural containment tests
+- `tests/test_containment.py` — live/structural containment tests
 - `tests/test_input_staging.py` — 4 trusted-input staging regression tests
 - `tests/test_artifact_boundary.py` — 3 trusted-output artifact regressions
 - `tests/test_linux_hardening.py` — seccomp program checks (BPF interpreter), live seccomp/Landlock/exec-allowlist/mount-layout proofs
@@ -286,4 +284,4 @@ Landlock: writes only under `/stele/output`, exec only of allowlisted programs, 
 - [x] artifact/input opens use `O_NONBLOCK`, so a parser-planted FIFO is rejected instead of hanging hashing, sealing, or replay
 - [x] seccomp filter kills blocked syscalls and non-native ABIs; violation reported in the run result
 - [x] Landlock refuses writes outside `/stele/output` and exec outside the allowlist
-- [x] Phase F staging path: `artifact_dir` (caller-supplied); ledger schema TBD in Phase F
+- [x] Staging path: `artifact_dir` (caller-supplied), consumed by the ledger

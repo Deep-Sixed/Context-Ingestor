@@ -1,5 +1,5 @@
 """
-Phase H adapter contract proof tests.
+Adapter contract proof tests.
 
 Seven required proofs:
 
@@ -12,8 +12,7 @@ Seven required proofs:
   PASS 7 — Dispatcher records target write success/failure separately
 
 Run:
-    cd EVECOR/services/stele
-    uv run pytest tests/test_phase_h_adapter_contract.py -v
+    uv run pytest tests/test_adapter_contract.py -v
 """
 from __future__ import annotations
 
@@ -324,7 +323,7 @@ class TestAdapterCannotBypassDispatcher:
         record = _sealed_record(store, artifact_dir)
         dispatcher = Dispatcher(store)  # no writers registered
         result = dispatcher.dispatch(
-            FakeAdapter(), record, HindsightTarget("jarvis")
+            FakeAdapter(), record, HindsightTarget("default")
         )
         assert result.status == "failed"
         assert "no writer" in (result.error or "").lower()

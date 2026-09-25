@@ -1,16 +1,10 @@
-# Phase H — Adapter Contract
-
-**Status:** COMPLETE  
-**Depends on:** Phase G  
-**Unblocks:** RAG-ANYTHING — PROCEED (Stele-gated ingestion with scoped tombstone support)
-
----
+# Adapter Contract
 
 ## Goal
 
 Define and enforce the typed interface that any downstream writer must
-implement to write through Stele.  After this phase, no parser-facing component
-may write to production via any other path.
+implement to write through Stele.  No parser-facing component
+may write to a target store via any other path.
 
 ---
 
@@ -41,7 +35,7 @@ differ from the ones its earlier attempt announced.
 to any external store" and "must be deterministic" are a contract, not an
 enforced capability boundary: Python cannot stop an adapter from opening its
 own connections (see the side-channel test in
-`test_phase_h_adapter_contract.py`). Only parser execution is sandboxed. An
+`test_adapter_contract.py`). Only parser execution is sandboxed. An
 adapter is reviewed and deployed like any other Stele code, never loaded from
 a parser or a document.
 
@@ -54,7 +48,10 @@ writer that wrote it.
 
 `SteleTarget` union:
 - `LightRAGTarget(workspace: str)`
-- `HindsightTarget(instance: Literal["jarvis", "nexus", "crms"])`
+- `HindsightTarget(instance: str)`
+
+These are example target types; register a `TargetWriter` for each target
+type you use.
 
 ---
 
@@ -137,12 +134,12 @@ Dispatcher.invalidate(record_id, reason)
 - A record invalidated directly in the ledger (`stele.replay.invalidation`)
   has its deliveries removed by `Dispatcher.retract_invalidated()`.
 
-Ledger states are defined once, in [F-ledger.md](F-ledger.md#state-machine).
+Ledger states are defined once, in [ledger.md](ledger.md#state-machine).
 Delivery is never a ledger state.
 
 ---
 
-## Invariants proven (25 tests / all green)
+## Invariants proven
 
 | Proof | Test class |
 |-------|-----------|
@@ -159,54 +156,3 @@ Durable dispatch and invalidation (#13) are proved in
 refusal of corrupted archived bytes, crash injection after the intent,
 mid-write and before the receipt with duplicate-free retries, and removal
 with receipts on invalidation.
-
----
-
-## Full Stele test counts (E + F + G + H)
-
-| Phase | Tests |
-|-------|-------|
-| E — Containment | 23 |
-| F — Ledger | 27 |
-| G — Replay / Invalidation | 24 |
-| H — Adapter Contract | 25 |
-| **Total** | **99** |
-
-All 99 pass.
-
----
-
-## Production wiring — COMPLETE 2026-06-26
-
-| Component | Path | Status |
-|-----------|------|--------|
-| `RagAnythingSteleAdapter` | `EVECOR/DataCore/RAG/rag_anything_stele_adapter.py` | ✅ |
-| `LightRAGTargetWriter` | `EVECOR/DataCore/RAG/lightrag_target_writer.py` | ✅ `_get_or_create_lightrag()` + `insert()` + `tombstone_by_run_id()` |
-| `lightrag_tombstone` | `EVECOR/DataCore/RAG/lightrag_tombstone.py` | ✅ narrow `{run_id}:` prefix delete; separate JSONL audit |
-| `lightrag_config` | `EVECOR/DataCore/RAG/lightrag_config.py` | ✅ shared LLM/embed factory |
-| `stele_ingest` | `EVECOR/DataCore/RAG/stele_ingest.py` | ✅ full orchestration |
-| `stele_rag_parser` | `EVECOR/DataCore/RAG/stele_rag_parser.py` | ✅ sandbox parser |
-| `ingest-lightrag` | `nexus/bin/ingest-lightrag` | ✅ Stele-gated live path |
-
-### Test counts
-
-| Suite | Tests |
-|-------|-------|
-| Integration (`test_rag_anything_stele_integration.py`) | 19 |
-| Production gate (`test_rag_anything_production_smoke.py`) | 6 |
-| Tombstone (`test_lightrag_tombstone.py`) | 6 |
-| **RAG × Stele total** | **31** |
-
-**Caveat:** KG entity/relation enrichment requires valid `LITELLM_RAG_ANYTHING_KEY`.
-Chunk insert and tombstone work without it; graph extraction returns 401 until provisioned.
-
-### Production gate proofs
-
-| Proof | Test class |
-|-------|-----------|
-| LightRAG `insert()` via writer | `TestLiveLightRAGInsert` |
-| dispatch_log records result | `TestDispatchLogRecordsResult` |
-| Ledger unchanged after dispatch | `TestLedgerUnchangedAfterDispatch` |
-| Replay re-selects artifact | `TestReplayReselectsArtifact` |
-| Invalidation tombstones matching chunks | `TestInvalidationTombstonesMatchingChunks` |
-| Tombstone proofs (6) | `test_lightrag_tombstone.py` |

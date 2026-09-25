@@ -45,7 +45,7 @@ from .sandbox import (
     SandboxConfig,
 )
 
-# Official Python image, pinned by (multi-arch index) digest. The Phase E
+# Official Python image, pinned by (multi-arch index) digest. The containment
 # fixtures are Python scripts; real parsers bring their own pinned image.
 DEFAULT_OCI_IMAGE = (
     "docker.io/library/python:3.12-slim"

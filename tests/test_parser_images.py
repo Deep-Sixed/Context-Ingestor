@@ -21,7 +21,7 @@ For every parser named in STELE_PARSER_IMAGES:
   - a recorded run replayed on the same image is EQUIVALENT under the
     parser's comparison policy, never REPRODUCED (roadmap #14).
 
-The containment proofs (tests/test_phase_e_containment.py) run against the
+The containment proofs (tests/test_containment.py) run against the
 same images via STELE_PROOF_IMAGES.
 """
 from __future__ import annotations

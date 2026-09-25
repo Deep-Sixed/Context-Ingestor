@@ -1,5 +1,5 @@
 """
-Stele Phase G — ledger views.
+Stele replay — ledger views.
 
 Four read-only projections over the ledger that cover the operationally
 relevant states.  All views return records in created_at order.

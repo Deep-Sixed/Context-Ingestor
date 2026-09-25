@@ -4,7 +4,7 @@ Stele — SQLite-backed artifact ledger store.
 One record per sandbox run. A record points into the evidence archive
 (stele.archive, roadmap #16): its input is a Snapshot digest there, and it is
 SEALED only once its artifact bundle is stored there and verified. The state
-machine is documented once, in docs/F-ledger.md.
+machine is documented once, in docs/ledger.md.
 
 Schema is intentionally portable: column names and types map 1:1 to what
 a future Postgres migration would look like.  The backend can be swapped
@@ -491,7 +491,7 @@ class LedgerStore:
 
         INVALIDATED is a terminal state — it cannot be reversed.
         Use this when a sealed artifact is found to be stale, incorrect, or
-        superseded (Phase G).
+        superseded (see replay/).
         """
         record = self._require(record_id)
 

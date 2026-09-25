@@ -1,5 +1,5 @@
 """
-Stele Phase G — invalidation operations.
+Stele replay — invalidation operations.
 
 Invalidation marks sealed (or pending) records as INVALIDATED. These
 functions touch the ledger only: the data a record delivered is removed by

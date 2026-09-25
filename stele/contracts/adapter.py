@@ -1,8 +1,8 @@
 """
-Stele Phase H — adapter contract.
+Stele contracts — adapter contract.
 
 The SteleAdapter protocol is the only authorized write boundary between
-parser output and production storage targets.
+parser output and downstream storage targets.
 
 Rules:
   - Adapters receive a SealedBundle and return list[SteleChunk].
@@ -10,20 +10,20 @@ Rules:
     evidence archive, re-verified against their digest on every read.
     Adapters never receive file paths, DB connections, file handles, or
     target objects.
-  - Adapters do NOT call Hindsight, Graphify, or LightRAG APIs directly.
+  - Adapters do NOT call target-store APIs (e.g. LightRAG, Hindsight) directly.
   - All target writes, and their removal on invalidation, are routed
     through the Dispatcher (contracts/dispatcher.py).
   - Invalid adapter output (wrong hashes, empty chunks) is rejected by the
     Dispatcher before any write reaches a target.
   - Adapters are trusted code running in the host process: the rules above
-    are a contract, not a capability boundary (see docs/H-adapter.md).
+    are a contract, not a capability boundary (see docs/adapter.md).
 """
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, Protocol
+from typing import Any, Mapping, Protocol
 
 from ..archive.records import SnapshotKind
 from ..archive.store import BlobStore
@@ -128,7 +128,7 @@ class LightRAGTarget:
 
 @dataclass(frozen=True)
 class HindsightTarget:
-    instance: Literal["jarvis", "nexus", "crms"]
+    instance: str
 
 
 SteleTarget = LightRAGTarget | HindsightTarget
