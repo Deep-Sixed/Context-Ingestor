@@ -127,8 +127,10 @@ A `SteleAdapter` for any bundle that has a normalizer.
   fails the transform, and nothing reaches a target.
 - It emits one chunk per unit. The chunk id is `<record_id>:<unit id>`.
 - The chunk metadata holds `kind`, `order`, `page`, `bbox`, `level`,
-  `parent` (as a chunk id), `anchor`, `attributes`, `schema` and
-  `normalizer`.
+  `parent` (as a chunk id), `anchor`, `attributes`, `schema`,
+  `normalizer`, and `stele_anchor`: the unit's anchor as a
+  [Stele reference](identity.md) (`stele:anchor:...`) that a consumer can
+  resolve to check a citation against the evidence.
 
 ## CLI
 
