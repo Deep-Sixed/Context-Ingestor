@@ -601,6 +601,7 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     conn.execute("DROP TABLE events")  # a v4 ledger has no event log (v7) either
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")
     conn.execute("DROP TRIGGER delivery_events_one_payload")  # added in v6
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added in v8
     conn.execute("PRAGMA user_version = 4")
     conn.commit()
     conn.close()
@@ -612,7 +613,7 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     assert ledger.find_by_parser(record.parser.name, device="cpu") == []
     assert verify_ledger(ledger).ok  # the migrated record was imported into the chain
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     # The chain commits to run conditions: changing them by hand is detected.
     conn.execute(
         "UPDATE artifact_records SET run_conditions=? WHERE record_id=?",
@@ -641,6 +642,7 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     conn.execute("DROP TABLE events")
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")  # added in v5
     conn.execute("DROP TRIGGER delivery_events_one_payload")  # added by version 6
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added by version 8
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -648,5 +650,5 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     ledger = open_ledger(db)
     assert ReplayLog(ledger).all() == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     conn.close()

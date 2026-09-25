@@ -342,7 +342,10 @@ def _apply(
 
 
 def _event_tuple(e: Any) -> tuple:
-    return (e["event"], e["planned"], e["chunks_digest"], e["done"], e["error"])
+    # attempt_id (schema 8) is absent from events chained before it existed,
+    # whose rows hold NULL.
+    attempt_id = e["attempt_id"] if "attempt_id" in e.keys() else None
+    return (e["event"], e["planned"], e["chunks_digest"], e["done"], e["error"], attempt_id)
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +397,7 @@ def backfill(conn: sqlite3.Connection) -> int:
         count += 1
     for row in conn.execute("SELECT * FROM delivery_events ORDER BY event_id").fetchall():
         append_event(conn, "delivery_event.imported", row["dispatch_id"], {
-            k: row[k] for k in ("event", "planned", "chunks_digest", "done", "error")
+            k: row[k] for k in ("event", "planned", "chunks_digest", "done", "error", "attempt_id")
         })
         count += 1
     for row in conn.execute("SELECT * FROM replays ORDER BY replayed_at, replay_id").fetchall():

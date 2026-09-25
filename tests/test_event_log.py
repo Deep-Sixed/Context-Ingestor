@@ -128,7 +128,14 @@ class TestChain:
         log.close()
         bodies = [e.body for e in EventLog(ledger).for_subject(dispatch_id)
                   if e.kind == "delivery.event"]
-        assert [(b["event"], b["done"]) for b in bodies] == [("intent", None), ("failure", None)]
+        # The failure wrote nothing under its own attempt; the intent's attempt
+        # stays open (the chain commits to both attempt ids).
+        assert [(b["event"], b["done"]) for b in bodies] == [("intent", None), ("failure", 0)]
+        assert bodies[0]["attempt_id"] and bodies[1]["attempt_id"]
+        assert bodies[0]["attempt_id"] != bodies[1]["attempt_id"]
+        log = DeliveryLog(ledger)
+        assert log.get(dispatch_id).possibly_written
+        log.close()
         assert verify_ledger(ledger).ok
 
     def test_chain_links_and_verifies(self, ledger, tmp_path) -> None:
@@ -322,6 +329,7 @@ def test_migration_logs_existing_state(tmp_path: Path) -> None:
 
     conn = _raw(ledger)
     conn.execute("DROP TABLE events")
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added in v8
     conn.execute("PRAGMA user_version = 6")  # v6: payload binding (#35), no event log yet
     conn.close()
 
@@ -341,7 +349,7 @@ def test_migration_logs_existing_state(tmp_path: Path) -> None:
     migrated.invalidate(ids["sealed"], "later")
     assert verify_ledger(migrated).ok
     c = sqlite3.connect(db)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     c.close()
 
 

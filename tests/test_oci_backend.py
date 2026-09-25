@@ -37,6 +37,7 @@ from stele.containment.oci import (
     OciBackend,
     parse_engine_info,
 )
+from stele.containment.capture import BoundedRun
 from stele.containment.runner import run_in_sandbox
 from stele.containment.sandbox import SandboxConfig
 
@@ -99,6 +100,28 @@ def _config(tmp_path: Path, **kwargs) -> SandboxConfig:
 
 def _argv(backend: OciBackend, config: SandboxConfig, user=(1000, 1000)) -> list[str]:
     return backend.build_argv(config, container_name="stele-test", user=user)
+
+
+def _fake_subprocess(monkeypatch, fake_run) -> None:
+    """Serve both the engine's probe/cleanup calls and the parser run from fake_run.
+
+    The run goes through run_bounded(); a TimeoutExpired from fake_run stands
+    for the run hitting its timeout.
+    """
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def bounded(argv, *, timeout, limit, cwd=None, pass_fds=()):
+        try:
+            proc = fake_run(argv, timeout=timeout, cwd=cwd)
+        except subprocess.TimeoutExpired as exc:
+            return BoundedRun(-1, _text(exc.output), _text(exc.stderr), timed_out=True)
+        return BoundedRun(proc.returncode, proc.stdout or "", proc.stderr or "", timed_out=False)
+
+    monkeypatch.setattr(oci_module, "run_bounded", bounded)
+
+
+def _text(raw) -> str:
+    return raw.decode() if isinstance(raw, bytes) else (raw or "")
 
 
 def _pairs(argv: list[str], flag: str) -> list[str]:
@@ -241,7 +264,7 @@ class TestArgv:
 
         monkeypatch.setattr(oci_module, "_host_ids", lambda: (0, 0))
         monkeypatch.setattr(oci_module, "_RootHandoff", _NoopHandoff)
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        _fake_subprocess(monkeypatch, fake_run)
         OciBackend().execute(_config(tmp_path))
         assert _pairs(seen["argv"], "--user") == ["65534:65534"]
 
@@ -432,7 +455,7 @@ class TestExecution:
                 )
             return subprocess.CompletedProcess(argv, 0, "", "")
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        _fake_subprocess(monkeypatch, fake_run)
         outcome = OciBackend().execute(_config(tmp_path, timeout_seconds=5))
         assert outcome.timed_out and outcome.exit_code == -1
         assert outcome.stdout == "partial"
@@ -478,7 +501,7 @@ class TestExecution:
                 return rm(argv)
             return inspect(argv)
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        _fake_subprocess(monkeypatch, fake_run)
         config = _config(tmp_path, timeout_seconds=5)
         with pytest.raises(ContainmentCleanupError, match="could not be proven removed") as info:
             OciBackend().execute(config)
@@ -501,14 +524,14 @@ class TestExecution:
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return next(inspections)
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        _fake_subprocess(monkeypatch, fake_run)
         assert OciBackend().execute(_config(tmp_path, timeout_seconds=5)).timed_out
 
     def test_outcome_records_image_digest(self, tmp_path: Path, monkeypatch) -> None:
         _fake_engine(monkeypatch)
         monkeypatch.setattr(oci_module, "_host_ids", lambda: (1000, 1000))
-        monkeypatch.setattr(
-            subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 3, "o", "e")
+        _fake_subprocess(
+            monkeypatch, lambda argv, **kw: subprocess.CompletedProcess(argv, 3, "o", "e")
         )
         outcome = OciBackend(image="python:3.12-slim").execute(_config(tmp_path))
         assert (outcome.exit_code, outcome.stdout, outcome.stderr) == (3, "o", "e")
