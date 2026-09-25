@@ -21,8 +21,8 @@ codebases that handle hostile input. Stele treats every parser as untrusted:
   every read re-hashes the bytes.
 - **Replay and invalidate.** A sealed run can be re-checked against the
   archive, or replayed by running the recorded parser on the recorded input
-  again. Each replay is reported as `REPRODUCED`, `EQUIVALENT`, `DIVERGED` or
-  `UNREPLAYABLE`. Invalidating a run withdraws it and removes what it
+  again. Each replay is reported as `REPRODUCED`, `EQUIVALENT`, `DIVERGED`,
+  `UNREPLAYABLE` or `FAILED`. Invalidating a run withdraws it and removes what it
   delivered, without rewriting history.
 - **Write through one door.** Adapters turn a sealed bundle into typed,
   hash-checked chunks. Only the Dispatcher, using writers you register, sends

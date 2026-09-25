@@ -111,6 +111,14 @@ as the entrypoint of the image, so it must resolve inside the image (e.g.
   only when `info` shows an active (non-unconfined) seccomp profile, or under
   gVisor. `RESOURCE_LIMITS` only when the engine enforces memory, CPU and PID
   limits — rootless Podman on cgroup v1 accepts the flags but ignores them.
+- **A timeout is reported only once the container is gone.** When the
+  engine CLI times out, Stele force-removes the container by its generated
+  name and then inspects that name until the engine reports no such
+  container. If it cannot prove that (the removal fails, or the engine cannot
+  answer), the run raises `ContainmentCleanupError` instead of returning a
+  timed-out result: the parser may still be running with its output
+  directory mounted writable, so nothing in that directory is collected or
+  sealed (`exc.artifact_dir` names it).
 - **Known limits.** Mount paths containing commas or quotes are refused rather
   than escaped. An engine error and a parser exiting 125 are indistinguishable.
   SELinux-enforcing hosts may need volume relabeling, which is not done yet.

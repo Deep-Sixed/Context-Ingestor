@@ -2,9 +2,10 @@
 Migrating older ledgers to the current schema.
 
 Version 2 (#12) → 3 (#13) adds the delivery log tables, 3 → 4 (#14) the
-replay log, and 4 → 5 (#30) the run_conditions column, NULL for existing
-records (their device and limits were never recorded). None of these touches
-existing rows.
+replay log, 4 → 5 (#30) the run_conditions column, NULL for existing
+records (their device and limits were never recorded), and 5 → 6 binds each
+delivery to the payload of its first intent and admits the FAILED replay
+outcome. None of these changes existing rows.
 
 Version 0 is a pre-#12 ledger.
 
@@ -40,6 +41,7 @@ from .store import (
     DELIVERY_DDL,
     REPLAY_DDL,
     RUN_CONDITIONS_DDL,
+    V6_DDL,
     ArtifactDriftError,
     MissingArtifactError,
     archive_bundle,
@@ -60,7 +62,7 @@ _V0_COLUMNS = {
 def migrate_to_current(conn: sqlite3.Connection, version: int, archive: BlobStore) -> None:
     """Migrate in place. The caller holds a BEGIN IMMEDIATE transaction."""
     # version → DDL that reaches version + 1
-    additive = {2: DELIVERY_DDL, 3: REPLAY_DDL, 4: RUN_CONDITIONS_DDL}
+    additive = {2: DELIVERY_DDL, 3: REPLAY_DDL, 4: RUN_CONDITIONS_DDL, 5: V6_DDL}
     if version in additive:
         while version in additive:
             for statement in additive[version]:

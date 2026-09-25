@@ -232,13 +232,34 @@ class TestInjectedNondeterminism:
         assert invalidate_diverged(Dispatcher(ledger), [result]) == []
         assert ledger.get(record.record_id).state is ArtifactState.SEALED
 
-    def test_failed_replay_run_is_diverged(self, ledger, tmp_path) -> None:
+    def test_failed_replay_run_is_failed_not_diverged(self, ledger, tmp_path) -> None:
         record = _record(ledger, _probe_spec(), _probe_input(tmp_path), tmp_path)
         # Same module, but a CPU budget too small to finish: the run traps.
+        # That says nothing about the sealed output, so it is not DIVERGED.
         tiny = _probe_spec(backend=lambda identity: WasmtimeBackend(fuel=10))
         result = replay_record(ledger, ParserCatalog([tiny]), record)
-        assert result.outcome is ReplayOutcome.DIVERGED
-        assert "failed" in result.reason
+        assert result.outcome is ReplayOutcome.FAILED
+        assert "failed" in result.reason and result.differences == ()
+        assert ReplayLog(ledger).with_outcome(ReplayOutcome.FAILED) == [result]
+
+    def test_failed_replay_does_not_invalidate(self, ledger, tmp_path) -> None:
+        record = _record(ledger, _probe_spec(), _probe_input(tmp_path), tmp_path)
+        from tests.test_durable_dispatch import MemoryTarget
+
+        class Adapter:
+            def transform(self, bundle):
+                return [make_chunk(p, bundle.read(p).hex()) for p in bundle.paths()]
+
+        target = MemoryTarget()
+        dispatcher = Dispatcher(ledger)
+        dispatcher.register_target(LightRAGTarget, target)
+        assert dispatcher.dispatch(Adapter(), record, LightRAGTarget("ws")).status == "success"
+
+        tiny = _probe_spec(backend=lambda identity: WasmtimeBackend(fuel=10))
+        result = replay_record(ledger, ParserCatalog([tiny]), record)
+        assert invalidate_diverged(dispatcher, [result]) == []
+        assert ledger.get(record.record_id).state is ArtifactState.SEALED
+        assert target.rows
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +596,7 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     ledger.close()
     conn = sqlite3.connect(db)
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")
+    conn.execute("DROP TRIGGER delivery_events_one_payload")  # added in v6
     conn.execute("PRAGMA user_version = 4")
     conn.commit()
     conn.close()
@@ -585,7 +607,7 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     assert migrated.state is record.state and migrated.artifact_hash == record.artifact_hash
     assert ledger.find_by_parser(record.parser.name, device="cpu") == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
     conn.close()
     assert RunConditions.from_dict(RunConditions(device="gpu", cpus=2).to_dict()).cpus == 2.0
     with pytest.raises(ValueError):
@@ -602,6 +624,7 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     conn.execute("DROP TRIGGER replays_append_only_d")
     conn.execute("DROP TABLE replays")
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")  # added in v5
+    conn.execute("DROP TRIGGER delivery_events_one_payload")  # added by version 6
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -609,5 +632,5 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     ledger = open_ledger(db)
     assert ReplayLog(ledger).all() == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
     conn.close()

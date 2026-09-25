@@ -14,6 +14,10 @@ Key invariants:
   - Writers receive the delivery's dispatch_id as an idempotency key. A retry
     of the same record to the same target reuses it and cannot duplicate
     data; a delivered delivery is never written again.
+  - A delivery writes one payload. Its first intent binds it to the chunks'
+    digest (ids, content hashes, token counts and metadata); any later or
+    concurrent attempt with a different payload is refused before its writer
+    is called.
   - Adapter or target failures never change the record's ledger state.
   - Invalidating a record removes every delivery it made that may have
     written data, through the writer that wrote it, with a receipt for each.
@@ -25,7 +29,7 @@ from datetime import datetime, timezone
 from typing import Literal, Protocol
 
 from ..archive.store import ArchiveError
-from ..ledger.delivery import Delivery, DeliveryLog, DeliveryStatus, chunks_digest
+from ..ledger.delivery import Delivery, DeliveryLog, DeliveryStatus, PayloadConflictError
 from ..ledger.models import ArtifactRecord, ArtifactState
 from ..ledger.store import ArtifactDriftError, LedgerStore, verify_archived_bundle
 from .adapter import SealedBundle, SteleAdapter, SteleChunk, SteleTarget, validate_chunks
@@ -150,11 +154,16 @@ class Dispatcher:
           1. Re-read the record from the ledger; refuse unless SEALED.
           2. Re-verify the bundle in the archive; refuse if it is not intact.
           3. adapter.transform(SealedBundle) → chunks; validate them.
-          4. Record the intent, write with the dispatch_id, record the receipt.
+          4. Record the intent, binding the delivery to the chunks (or refuse
+             them if it is bound to another payload), write with the
+             dispatch_id, record the receipt.
 
         Refusals (1, 2) raise DispatchRefusedError and log nothing. Failures
         in 3 and 4 are logged and returned as status="failed"; the record's
-        ledger state is never modified by a failed dispatch.
+        ledger state is never modified by a failed dispatch. A payload the
+        delivery is not bound to (4) is returned as status="failed" without
+        a log event: nothing was written, and the log describes the bound
+        payload's attempts only.
         """
         record_id = record.record_id if isinstance(record, ArtifactRecord) else record
         live = self._ledger.get(record_id)
@@ -180,17 +189,18 @@ class Dispatcher:
             chunks = adapter.transform(SealedBundle.from_record(live, self._ledger.archive))
             validate_chunks(chunks)
             writer = self._writer_for(type(target))
-            digest = chunks_digest(chunks)
-            if delivery.chunks_digest is not None and delivery.chunks_digest != digest:
-                raise ValueError(
-                    "adapter produced different chunks than this delivery's earlier "
-                    "attempt; adapters must be deterministic"
-                )
         except Exception as exc:
-            self._log.append(dispatch_id, "failure", done=0, error=repr(exc))
+            self._log.append_unwritten_failure(dispatch_id, repr(exc))
             return self._result(self._log.get(dispatch_id), target)
+        try:
+            # Binds the delivery to this payload, or refuses it if an earlier
+            # or concurrent attempt already bound a different one.
+            self._log.append_intent(dispatch_id, chunks)
+        except PayloadConflictError as exc:
+            # Nothing was written and the delivery's log is left as it is: it
+            # describes the bound payload's attempts, which this one is not.
+            return self._result(self._log.get(dispatch_id), target, refused=repr(exc))
 
-        self._log.append(dispatch_id, "intent", planned=len(chunks), chunks_digest=digest)
         try:
             writer.write_chunks(chunks, target, dispatch_id=dispatch_id)
         except Exception as exc:
@@ -300,8 +310,25 @@ class Dispatcher:
         raise UnregisteredTargetError(f"no writer registered for {target_kind}")
 
     def _result(
-        self, delivery: Delivery, target: SteleTarget, *, already_delivered: bool = False
+        self,
+        delivery: Delivery,
+        target: SteleTarget,
+        *,
+        already_delivered: bool = False,
+        refused: str | None = None,
     ) -> DispatchResult:
+        if refused is not None:
+            # This call wrote nothing; the delivery's own history is unchanged.
+            return DispatchResult(
+                dispatch_id=delivery.dispatch_id,
+                record_id=delivery.record_id,
+                target=target,
+                chunks_submitted=0,
+                chunks_written=0,
+                status="failed",
+                error=refused,
+                dispatched_at=datetime.now(timezone.utc),
+            )
         last = next(
             (e for e in reversed(delivery.events) if e.event in ("receipt", "failure")), None
         )

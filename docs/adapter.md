@@ -44,7 +44,11 @@ called, is gone). Removing delivered data is a target write, done by the
 writer that wrote it.
 
 `SteleChunk` fields: `chunk_id`, `content`, `content_hash` (sha256 verified),
-`token_count`, `metadata`.
+`token_count` (a non-negative `int`), `metadata`. `metadata` must be a JSON
+object with exactly one canonical encoding: it must survive a JSON round
+trip unchanged (string keys only; no tuples, sets, NaN, infinities or other
+non-JSON values). It is part of what a delivery fingerprints, like the
+content.
 
 `SteleTarget` union:
 - `LightRAGTarget(workspace: str)`
@@ -84,7 +88,8 @@ Dispatcher.dispatch(adapter, record_id, target)
       ├── re-verify the bundle in the archive  →  DispatchRefusedError if not intact
       ├── adapter.transform(SealedBundle)      →  list[SteleChunk]
       ├── validate_chunks(chunks)              →  logged failure if invalid
-      ├── log  intent  (planned, chunks digest)          ── durable before the write
+      ├── log  intent  (planned, chunks digest)          ── durable before the write;
+      │                                                    binds the delivery's payload
       ├── TargetWriter.write_chunks(chunks, target, dispatch_id=…)
       └── log  receipt (done)  |  failure (done or unknown, error)
 ```
@@ -112,6 +117,16 @@ dispatch_id …"). Dispatching the same record to the same target again reuses
 the delivery's `dispatch_id`, so the retry completes it without duplicates;
 a delivery that already has a receipt is not written again
 (`already_delivered=True`).
+
+A delivery writes **one payload**. Its first intent binds it to the chunks'
+digest, which covers every chunk's `chunk_id`, `content_hash`, `token_count`
+and `metadata`, in order. The intent is recorded in a write transaction that
+first checks any earlier intent, and a database trigger refuses an intent
+with a different digest. So a retry, or a concurrent dispatch of the same
+record to the same target, that presents a different payload (even one that
+differs only in metadata) is refused: `dispatch()` returns `status="failed"`,
+its writer is never called, and the delivery's log is left unchanged. Deliveries bound before ledger schema 6 recorded a digest of ids and
+content hashes only, and are checked that far.
 
 A failed dispatch never changes the record's ledger state; invalidating
 after a failure is the caller's decision.
