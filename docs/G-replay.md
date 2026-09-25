@@ -98,6 +98,20 @@ structural policy:
   tolerance and `ignore_keys` (e.g. timestamps) skipped at any depth;
 - every other file must be byte-identical.
 
+The packaged ML parsers (MinerU, Marker, Docling; `stele/parsers/catalog.py`)
+each carry `ML_REPLAY_POLICY`:
+- `abs_tol=0.5` on coordinates in points or pixels, which absorbs float noise
+  from thread-order effects but not a moved block;
+- `rel_tol=1e-6`;
+- `device` ignored in `stele-parser.json`;
+- text must match exactly.
+
+`stele.parsers.replay.record_parser_run()` records a packaged-parser run in
+the ledger. `replay_spec(parser)` replays it on the CPU image through the same
+command and configuration environment as `run_parser()`. The parser-images
+workflow replays a real document through each built image and expects
+`EQUIVALENT`.
+
 ### Cross-platform harness
 
 `tests/test_replay_engine.py` replays a frozen Snapshot fixture
