@@ -51,7 +51,18 @@ class ParserIdentity:
 
 
 _DEVICES = ("cpu", "gpu")
-_MEMORY_RE = re.compile(r"^[1-9][0-9]*[bkmg]?$")
+# The memory-limit syntax docker and podman accept (go-units RAMInBytes): a
+# number, optionally fractional, then an optional unit with optional "i"/"b".
+_MEMORY_RE = re.compile(r"^(\d+(?:\.\d+)?) ?(?:[kmgtp]i?)?b?$")
+
+
+def is_memory_limit(value: object) -> bool:
+    """True if value is a positive memory limit the container engines accept,
+    e.g. "512m", "1.5g", "6gb", "512MiB"."""
+    if not isinstance(value, str):
+        return False
+    match = _MEMORY_RE.match(value.lower())
+    return match is not None and float(match.group(1)) > 0
 
 
 @dataclass(frozen=True)
@@ -72,9 +83,7 @@ class RunConditions:
     def __post_init__(self) -> None:
         if self.device not in _DEVICES:
             raise ValueError(f"RunConditions.device must be one of {_DEVICES}, not {self.device!r}")
-        if self.memory is not None and (
-            not isinstance(self.memory, str) or not _MEMORY_RE.match(self.memory.lower())
-        ):
+        if self.memory is not None and not is_memory_limit(self.memory):
             raise ValueError(f"not a memory limit: {self.memory!r}")
         if self.cpus is not None:
             if isinstance(self.cpus, bool) or not isinstance(self.cpus, (int, float)) or self.cpus <= 0:

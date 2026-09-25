@@ -45,6 +45,7 @@ from ..containment.oci import OciBackend
 from ..containment.result import SandboxResult
 from ..containment.runner import run_in_sandbox
 from ..containment.sandbox import SandboxConfig
+from ..ledger.models import is_memory_limit
 
 if TYPE_CHECKING:
     from ..archive.store import BlobStore
@@ -293,6 +294,13 @@ def _last_line(text: str) -> str:
     return lines[-1][:500] if lines else ""
 
 
+def _check_memory(memory: str) -> str:
+    """Refuse, before running, a memory limit the ledger could not record."""
+    if not is_memory_limit(memory):
+        raise ValueError(f"not a memory limit: {memory!r} (e.g. \"512m\", \"1.5g\", \"6GiB\")")
+    return memory
+
+
 def run_parser(
     parser: ParserImage,
     input_path: Path,
@@ -312,8 +320,10 @@ def run_parser(
     `config` replaces keys of the parser's default configuration; the merged
     configuration is what the parser receives and what the identity records.
     Raises UnsupportedInputError for a document type the parser does not
-    accept, and SandboxUnavailableError when no suitable backend (image,
-    engine, enforced limits, GPU if required) is available. Parser failures
+    accept, ValueError for a memory limit the container engines do not
+    accept (so a run is never made that the ledger could not record), and
+    SandboxUnavailableError when no suitable backend (image, engine,
+    enforced limits, GPU if required) is available. Parser failures
     are not raised: they come back as ParserRun.failure, with no output kept.
     """
     input_path = Path(input_path)
@@ -325,14 +335,14 @@ def run_parser(
         )
 
     merged = {**parser.config, **(config or {})}
-    memory = memory or parser.memory
+    memory = _check_memory(memory or parser.memory)
     cpus = cpus or parser.cpus
     timeout = timeout_seconds or parser.timeout_seconds
 
     if backend is not None:
         chosen = backend
         # Record the limits the given backend actually applies.
-        memory = getattr(backend, "memory", memory)
+        memory = _check_memory(getattr(backend, "memory", memory))
         cpus = getattr(backend, "cpus", cpus)
         dev: Literal["cpu", "gpu"] = "gpu" if getattr(backend, "gpu", False) else "cpu"
         requirements = ParserRequirements(

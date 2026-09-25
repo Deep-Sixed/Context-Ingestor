@@ -614,6 +614,11 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
         RunConditions(device="tpu")
     with pytest.raises(ValueError):
         RunConditions.from_dict({"device": "cpu", "shm": "1g"})
+    for memory in ("512m", "1.5g", "6gb", "512MiB", "1 g", "1t"):
+        assert RunConditions(memory=memory).memory == memory
+    for memory in ("", "0", "g", "1.2.3g", "5ib", "1x"):
+        with pytest.raises(ValueError, match="not a memory limit"):
+            RunConditions(memory=memory)
 
 
 def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:

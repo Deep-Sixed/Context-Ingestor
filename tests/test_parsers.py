@@ -479,6 +479,27 @@ class TestReplay:
         with pytest.raises(ValueError):
             ledger.find_by_parser("fake", device="tpu")
 
+    @pytest.mark.parametrize("memory", ["1.5g", "6gb", "512MiB", "1t", "2048"])
+    def test_every_engine_memory_syntax_is_recorded(
+        self, memory: str, doc: Path, tmp_path: Path
+    ) -> None:
+        backend = FakeBackend(write=self._files(self.LAYOUT))
+        backend.memory = memory
+        ledger, record = self._record_with(tmp_path, doc, self.POLICY_PARSER, backend)
+        assert record.run_conditions.memory == memory
+
+    @pytest.mark.parametrize("memory", ["lots", "0g", "1.2.3g"])
+    def test_a_memory_limit_the_ledger_refuses_is_refused_before_running(
+        self, memory: str, doc: Path, tmp_path: Path
+    ) -> None:
+        with pytest.raises(ValueError, match="not a memory limit"):
+            run_parser(self.POLICY_PARSER, doc, tmp_path / "out", memory=memory)
+        backend = FakeBackend()
+        backend.memory = memory
+        with pytest.raises(ValueError, match="not a memory limit"):
+            run_parser(self.POLICY_PARSER, doc, tmp_path / "out", backend=backend)
+        assert backend.seen is None and not (tmp_path / "out").exists()
+
     def test_gpu_record_replays_on_the_gpu_image(self, doc: Path, tmp_path: Path) -> None:
         files = self._files(self.LAYOUT)
         ledger, record = self._record_with(
