@@ -9,6 +9,12 @@ SANDBOX_INPUT_DIR = "/stele/input"
 # Legacy alias — input file is mounted at SANDBOX_INPUT_DIR/<original_filename>
 SANDBOX_INPUT = SANDBOX_INPUT_DIR
 SANDBOX_SCRIPT = "/stele/parser"
+# Landlock launcher (stele/containment/landlock.py), bound read-only.
+SANDBOX_LANDLOCK = "/stele/landlock"
+
+# Device sinks that stay writable under Landlock: libraries routinely open
+# /dev/null for writing, and nothing written to these persists.
+_LANDLOCK_WRITE_DEVICES = ["/dev/null", "/dev/zero", "/dev/full"]
 
 # Read-only bind of the full /usr tree gives parsers access to system Python,
 # standard libs, and common binaries without exposing writable host paths.
@@ -52,11 +58,47 @@ class SandboxConfig:
 
     timeout_seconds: int = 300
 
+    # Extra programs (sandbox paths, or names looked up on PATH) the parser may
+    # exec. Where Landlock is enforced, command[0] and the interpreters it
+    # needs are the only other executables; everything else fails with EACCES.
+    exec_allowlist: list[str] = field(default_factory=list)
+
+    # Let the parser write to the ephemeral /tmp tmpfs as well as
+    # /stele/output. On by default, matching the container backend: real
+    # parsers (MinerU, Marker, Docling, anything using tempfile) need scratch
+    # space. Each run gets its own /tmp, which is discarded when the sandbox
+    # exits, so nothing written there is ever persisted or seen by another
+    # run. Set False to allow writes only under /stele/output.
+    writable_scratch: bool = True
+
+
+@dataclass(frozen=True)
+class LandlockLaunch:
+    """How to start the Landlock launcher inside the sandbox."""
+
+    # Interpreter visible inside the sandbox that runs the launcher script.
+    python: str
+    # Host path of stele/containment/landlock.py, bound at SANDBOX_LANDLOCK.
+    script: str
+
 
 class BubblewrapSandbox:
     """Builds the bwrap(1) argv for a SandboxConfig."""
 
-    def build_argv(self, config: SandboxConfig) -> list[str]:
+    def build_argv(
+        self,
+        config: SandboxConfig,
+        *,
+        seccomp_fd: int | None = None,
+        landlock: LandlockLaunch | None = None,
+    ) -> list[str]:
+        """bwrap argv for config.
+
+        seccomp_fd: an fd (passed to bwrap via pass_fds) holding the compiled
+        BPF program; bwrap installs it just before exec.
+        landlock: when set, the command runs through the Landlock launcher,
+        which confines writes and exec and then execs the command.
+        """
         argv: list[str] = ["bwrap"]
 
         # --- Filesystem layout ---
@@ -97,6 +139,15 @@ class BubblewrapSandbox:
         for src, dst in config.extra_ro_binds:
             argv += ["--ro-bind", src, dst]
 
+        if landlock is not None:
+            argv += ["--ro-bind", landlock.script, SANDBOX_LANDLOCK]
+
+        # bwrap builds the layout on a tmpfs root, which is writable unless
+        # remounted. Make it read-only so stray writes (/, /stele, /etc) fail
+        # instead of landing in ephemeral memory; the tmpfs and bind mounts
+        # above keep their own flags.
+        argv += ["--remount-ro", "/"]
+
         # --- Namespace isolation ---
         argv += [
             "--unshare-user",  # gain capabilities only inside a private user namespace
@@ -111,6 +162,10 @@ class BubblewrapSandbox:
             "--die-with-parent",  # sandbox dies if the runner process dies
         ]
 
+        # --- Syscall filter ---
+        if seccomp_fd is not None:
+            argv += ["--seccomp", str(seccomp_fd)]
+
         # --- Environment ---
         # Clear everything, then inject a minimal known-good environment.
         argv += ["--clearenv"]
@@ -124,6 +179,20 @@ class BubblewrapSandbox:
 
         # --- Working directory and command ---
         argv += ["--chdir", SANDBOX_OUTPUT]
-        argv += ["--"] + config.command
+        argv += ["--"] + self._landlock_prefix(config, landlock) + config.command
 
         return argv
+
+    @staticmethod
+    def _landlock_prefix(config: SandboxConfig, landlock: LandlockLaunch | None) -> list[str]:
+        if landlock is None:
+            return []
+        # -I: ignore PYTHON* env and user site; -S: skip site; -B: no .pyc writes.
+        argv = [landlock.python, "-I", "-S", "-B", SANDBOX_LANDLOCK, "--write", SANDBOX_OUTPUT]
+        if config.writable_scratch:
+            argv += ["--write", "/tmp"]
+        for device in _LANDLOCK_WRITE_DEVICES:
+            argv += ["--write-dev", device]
+        for program in config.exec_allowlist:
+            argv += ["--exec", program]
+        return argv + ["--"]

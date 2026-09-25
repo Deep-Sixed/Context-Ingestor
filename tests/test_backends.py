@@ -98,10 +98,15 @@ class TestRequirements:
         assert [c for c in Capability if "network" in c.value] == [Capability.NETWORK_ISOLATION]
 
     def test_bubblewrap_claims_only_what_it_enforces(self) -> None:
-        caps = BubblewrapBackend().capabilities()
-        assert caps == BASE | {Capability.NATIVE_LIBS}
-        for not_yet in (Capability.SYSCALL_FILTER, Capability.RESOURCE_LIMITS,
-                        Capability.GPU, Capability.DETERMINISTIC):
+        backend = BubblewrapBackend()
+        caps = backend.capabilities()
+        expected = BASE | {Capability.NATIVE_LIBS}
+        # The syscall filter is claimed exactly when execute() installs it.
+        if backend.seccomp_program() is not None:
+            expected |= {Capability.SYSCALL_FILTER}
+        assert caps == expected
+        for not_yet in (Capability.RESOURCE_LIMITS, Capability.GPU,
+                        Capability.DETERMINISTIC):
             assert not_yet not in caps
 
 
