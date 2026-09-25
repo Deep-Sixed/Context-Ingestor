@@ -15,8 +15,15 @@ import sys
 from pathlib import Path
 
 from ..containment.backend import UnsupportedBackendError
+from ..ledger.models import is_memory_limit
 from . import UnsupportedInputError, run_parser
 from .catalog import PARSERS, get_parser
+
+
+def _memory_limit(value: str) -> str:
+    if not is_memory_limit(value):
+        raise argparse.ArgumentTypeError(f"not a memory limit: {value!r} (e.g. 4g, 1.5g, 512m)")
+    return value
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -38,7 +45,7 @@ def _main(argv: list[str] | None = None) -> int:
                      help="JSON object overriding the parser's default configuration.")
     run.add_argument("--device", default="auto", choices=["auto", "cpu", "gpu"])
     run.add_argument("--engine", default=None, choices=["docker", "podman"])
-    run.add_argument("--memory", default=None, help="Memory limit, e.g. 4g.")
+    run.add_argument("--memory", default=None, type=_memory_limit, help="Memory limit, e.g. 4g.")
     run.add_argument("--cpus", default=None, type=float)
     run.add_argument("--timeout", default=None, type=int, metavar="SECONDS")
 

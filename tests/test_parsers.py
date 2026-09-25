@@ -573,6 +573,44 @@ class TestReplay:
         assert (backend.memory, backend.cpus, backend.gpu) == (PARSER.memory, PARSER.cpus, False)
         assert backend.image == PARSER.image
 
+    @pytest.mark.parametrize("memory", ["1.5g", "4gb", "512mb", "1t", "4GiB", "2048", "8G"])
+    def test_engine_memory_syntax_is_recorded(self, doc: Path, tmp_path: Path, memory: str) -> None:
+        """Docker and Podman accept these limits; a run made with one must reach the ledger."""
+        backend = FakeBackend(write=self._files(self.LAYOUT))
+        backend.memory = memory
+        ledger, record = self._record_with(tmp_path, doc, self.POLICY_PARSER, backend)
+        assert record.run_conditions.memory == memory
+        assert ledger.get(record.record_id).run_conditions.memory == memory
+
+    @pytest.mark.parametrize("limits", [
+        {"memory": "lots"}, {"memory": "0g"}, {"memory": "-1g"}, {"memory": "1.5x"},
+        {"cpus": -1.0}, {"timeout_seconds": 600.0}, {"timeout_seconds": -5},
+    ])
+    def test_bad_limits_are_refused_before_the_run(
+        self, doc: Path, tmp_path: Path, limits: dict
+    ) -> None:
+        """A limit the ledger cannot record is refused up front, not after a finished run."""
+        backend = FakeBackend(write=self._files(self.LAYOUT))
+        with pytest.raises(ValueError):
+            run_parser(self.POLICY_PARSER, doc, tmp_path / "out", backend=backend, **limits)
+        assert backend.seen is None
+
+    def test_a_given_backend_with_a_bad_limit_is_refused_before_the_run(
+        self, doc: Path, tmp_path: Path
+    ) -> None:
+        backend = FakeBackend(write=self._files(self.LAYOUT))
+        backend.memory = "lots"
+        with pytest.raises(ValueError, match="not a memory limit"):
+            run_parser(self.POLICY_PARSER, doc, tmp_path / "out", backend=backend)
+        assert backend.seen is None
+
+    def test_cli_refuses_a_bad_memory_limit(self, doc: Path, tmp_path: Path, capsys) -> None:
+        with pytest.raises(SystemExit) as exc:
+            cli_main(["run", "mineru", "--input", str(doc), "--artifact-dir",
+                      str(tmp_path / "o"), "--memory", "lots"])
+        assert exc.value.code == 2
+        assert "not a memory limit" in capsys.readouterr().err
+
     def test_image_not_present_is_unreplayable(self, doc: Path, tmp_path: Path) -> None:
         ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))
         # The real CPU backend: localhost/stele/fake:1.0 was never built here.
