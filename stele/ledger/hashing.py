@@ -61,7 +61,7 @@ def sha256_file(path: Path) -> str:
     path = Path(path)
 
     observed = os.lstat(path)
-    if not stat.S_ISREG(observed.st_mode):
+    if not stat.S_ISREG(observed.st_mode) or _is_link_or_reparse_point(observed):
         raise UnsafeFileError(f"path is not a regular file: {path}")
 
     flags = _nofollow_flags() if hasattr(os, "O_NOFOLLOW") else os.O_RDONLY | _BINARY
@@ -164,11 +164,12 @@ def sha256_file_beneath(root: Path, relative_path: Path) -> str:
                 pass
 
 
-def _is_link_or_junction(path: Path, st: os.stat_result) -> bool:
-    if stat.S_ISLNK(st.st_mode):
-        return True
-    isjunction = getattr(os.path, "isjunction", None)
-    return bool(isjunction and isjunction(path))
+def _is_link_or_reparse_point(st: os.stat_result) -> bool:
+    """Symlink, or (on Windows) any reparse point: junctions, mount points,
+    app-exec links, cloud placeholders. All of them can redirect an open."""
+    return stat.S_ISLNK(st.st_mode) or bool(
+        getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
 
 
 def _sha256_beneath_by_lstat(root: Path, relative_path: Path) -> str:
@@ -178,7 +179,7 @@ def _sha256_beneath_by_lstat(root: Path, relative_path: Path) -> str:
         if component is not None:
             current = current / component
         st = os.lstat(current)
-        if _is_link_or_junction(current, st) or not stat.S_ISDIR(st.st_mode):
+        if _is_link_or_reparse_point(st) or not stat.S_ISDIR(st.st_mode):
             raise UnsafeFileError(
                 f"unsafe artifact directory component (link/non-directory): {current}"
             )

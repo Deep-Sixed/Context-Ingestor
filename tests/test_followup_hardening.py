@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from stele.containment.result import SandboxResult
+import stele.containment.runner as runner_module
 from stele.containment.runner import run_in_sandbox
 from stele.containment.sandbox import BubblewrapSandbox, SandboxConfig
 from stele.ledger.hashing import UnsafeFileError, sha256_file_beneath
@@ -156,6 +157,7 @@ class TestSessionIsolation:
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(runner_module, "bwrap_available", lambda: True)
         run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=tmp_path / "out"))
         assert seen["stdin"] is subprocess.DEVNULL
 
@@ -203,6 +205,7 @@ class TestFreshOutputDirectory:
         monkeypatch.setattr(
             subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")
         )
+        monkeypatch.setattr(runner_module, "bwrap_available", lambda: True)
         result = run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=artifact_dir))
         assert result.artifact_paths == []
 

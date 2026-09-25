@@ -237,3 +237,95 @@ class TestConditionalTransitions:
         failed = self._pending(store, artifact_dir)
         store.fail(failed, "boom")
         assert store.get(failed).state is ArtifactState.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Second review round (commit b4bbb08)
+# ---------------------------------------------------------------------------
+
+class TestOriginalErrorIsNeverMasked:
+
+    def test_database_error_in_fail_does_not_replace_block_error(
+        self, tmp_path: Path, artifact_dir: Path, monkeypatch
+    ) -> None:
+        import sqlite3
+
+        store = LedgerStore(tmp_path / "ledger.db")
+        (artifact_dir / "result.json").write_text("data")
+
+        def locked(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        class AdapterError(RuntimeError):
+            pass
+
+        with pytest.raises(AdapterError):
+            with ledger_transaction(store, _result(artifact_dir)):
+                monkeypatch.setattr(store, "fail", locked)
+                raise AdapterError("downstream write failed")
+
+    def test_read_back_failure_after_durable_commit_is_not_a_failure(
+        self, tmp_path: Path, artifact_dir: Path, monkeypatch
+    ) -> None:
+        store = LedgerStore(tmp_path / "ledger.db")
+        (artifact_dir / "result.json").write_text("data")
+        real_commit = store.commit
+
+        def commit_then_readback_fails(record_id):
+            real_commit(record_id)
+            raise RuntimeError("read-back failed after COMMITTED was written")
+
+        monkeypatch.setattr(store, "commit", commit_then_readback_fails)
+        with ledger_transaction(store, _result(artifact_dir)) as record:
+            pass
+
+        assert store.get(record.record_id).state is ArtifactState.COMMITTED
+
+    def test_interrupt_after_durable_commit_still_propagates(
+        self, tmp_path: Path, artifact_dir: Path, monkeypatch
+    ) -> None:
+        store = LedgerStore(tmp_path / "ledger.db")
+        (artifact_dir / "result.json").write_text("data")
+        real_commit = store.commit
+
+        def commit_then_interrupt(record_id):
+            real_commit(record_id)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(store, "commit", commit_then_interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            with ledger_transaction(store, _result(artifact_dir)) as record:
+                pass
+        assert store.get(record.record_id).state is ArtifactState.COMMITTED
+
+
+class TestUnsearchableOutputDirectory:
+
+    def test_lstat_error_becomes_unsafe_artifact_error(
+        self, artifact_dir: Path, monkeypatch
+    ) -> None:
+        sub = artifact_dir / "sub"
+        sub.mkdir()
+        (sub / "f.json").write_text("{}")
+        real_lstat = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            if Path(path) == sub / "f.json":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "lstat", lstat)
+        with pytest.raises(UnsafeArtifactError, match="unreadable"):
+            collect_artifact_paths(artifact_dir)
+
+    @requires_non_root
+    def test_chmod_0444_subdirectory_is_refused(self, artifact_dir: Path) -> None:
+        sub = artifact_dir / "sub"
+        sub.mkdir()
+        (sub / "f.json").write_text("{}")
+        sub.chmod(0o444)
+        try:
+            with pytest.raises(UnsafeArtifactError, match="unreadable"):
+                collect_artifact_paths(artifact_dir)
+        finally:
+            sub.chmod(0o700)

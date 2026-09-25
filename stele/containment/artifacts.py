@@ -10,6 +10,18 @@ class UnsafeArtifactError(ValueError):
     """Raised when parser output contains a symlink or non-regular entry."""
 
 
+def _lstat(path: Path) -> os.stat_result:
+    # A directory that is listable but not searchable (e.g. chmod 0444) lets
+    # os.walk see names whose lstat then fails; treat that like unreadable.
+    try:
+        return os.lstat(path)
+    except OSError as exc:
+        raise UnsafeArtifactError(
+            f"unreadable artifact entry (parser-controlled permissions?): "
+            f"{path}: {exc.strerror}"
+        ) from exc
+
+
 def collect_artifact_paths(artifact_dir: Path) -> list[Path]:
     """Return regular files under artifact_dir without following symlinks.
 
@@ -43,7 +55,7 @@ def collect_artifact_paths(artifact_dir: Path) -> list[Path]:
 
         for name in dirnames:
             path = root_path / name
-            entry = os.lstat(path)
+            entry = _lstat(path)
             if not stat.S_ISDIR(entry.st_mode):
                 raise UnsafeArtifactError(
                     f"unsafe artifact directory entry (symlink/non-directory): {path}"
@@ -51,7 +63,7 @@ def collect_artifact_paths(artifact_dir: Path) -> list[Path]:
 
         for name in filenames:
             path = root_path / name
-            entry = os.lstat(path)
+            entry = _lstat(path)
             if not stat.S_ISREG(entry.st_mode):
                 raise UnsafeArtifactError(
                     f"unsafe artifact file entry (symlink/non-regular): {path}"

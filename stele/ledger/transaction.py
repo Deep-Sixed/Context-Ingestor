@@ -29,8 +29,8 @@ from contextlib import contextmanager
 from typing import Generator
 
 from ..containment.result import SandboxResult
-from .models import ArtifactRecord
-from .store import InvalidStateTransitionError, LedgerStore
+from .models import ArtifactRecord, ArtifactState
+from .store import LedgerStore
 
 
 class SandboxFailedError(Exception):
@@ -105,19 +105,34 @@ def ledger_transaction(
     try:
         store.commit(record.record_id)
     except BaseException as exc:
+        if isinstance(exc, Exception) and _state_or_none(store, record.record_id) is (
+            ArtifactState.COMMITTED
+        ):
+            # The COMMITTED write is durable; only the read-back after it
+            # failed. Reporting failure here would make callers undo downstream
+            # work the ledger records as committed.
+            return
         # The block already ran (downstream writes may exist) but the bundle
         # failed commit-time verification: record that outcome explicitly.
         _fail_quietly(store, record.record_id, exc)
         raise
 
 
+def _state_or_none(store: LedgerStore, record_id: str) -> ArtifactState | None:
+    try:
+        return store.get(record_id).state
+    except Exception:
+        return None
+
+
 def _fail_quietly(store: LedgerStore, record_id: str, exc: BaseException) -> None:
     """Mark record FAILED without masking the original exception.
 
-    If the record already left PENDING (e.g. invalidated concurrently), the
-    fail() transition is refused; the caller still sees the original error.
+    Any error from fail() itself — the record already left PENDING, or the
+    database is locked/unavailable — is swallowed so the caller always sees
+    the original exception. In the second case the record may stay PENDING.
     """
     try:
         store.fail(record_id, error=repr(exc))
-    except InvalidStateTransitionError:
+    except Exception:
         pass

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+import stele.containment.runner as runner_module
 from stele.containment.runner import SandboxUnavailableError, run_in_sandbox
 from stele.containment.sandbox import SandboxConfig
 from stele.ledger import hashing
@@ -86,6 +87,7 @@ def test_missing_bubblewrap_raises_clear_error(tmp_path: Path, monkeypatch) -> N
         raise FileNotFoundError(2, "No such file or directory", argv[0])
 
     monkeypatch.setattr(subprocess, "run", no_bwrap)
+    monkeypatch.setattr(runner_module, "bwrap_available", lambda: True)
     with pytest.raises(SandboxUnavailableError, match="Linux bubblewrap"):
         run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=tmp_path / "o"))
 
@@ -96,6 +98,7 @@ def test_missing_bubblewrap_on_windows_style_error(tmp_path: Path, monkeypatch) 
         raise FileNotFoundError(2, "The system cannot find the file specified")
 
     monkeypatch.setattr(subprocess, "run", no_bwrap)
+    monkeypatch.setattr(runner_module, "bwrap_available", lambda: True)
     with pytest.raises(SandboxUnavailableError):
         run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=tmp_path / "o"))
 
@@ -103,3 +106,47 @@ def test_missing_bubblewrap_on_windows_style_error(tmp_path: Path, monkeypatch) 
 def test_race_free_path_is_used_on_posix() -> None:
     if os.name == "posix":
         assert hashing.RACE_FREE_NOFOLLOW
+
+
+def test_missing_bubblewrap_reported_before_input_staging(tmp_path: Path, monkeypatch) -> None:
+    # Staging needs no-follow opens that Windows lacks; the bwrap check must
+    # come first so the user sees the real cause.
+    source = tmp_path / "input.txt"
+    source.write_text("data")
+    monkeypatch.setattr(runner_module, "bwrap_available", lambda: False)
+
+    def must_not_stage(*args, **kwargs):
+        raise AssertionError("input must not be staged when bwrap is missing")
+
+    monkeypatch.setattr(runner_module, "stage_regular_file", must_not_stage)
+    with pytest.raises(SandboxUnavailableError, match="Linux bubblewrap"):
+        run_in_sandbox(SandboxConfig(
+            command=["/usr/bin/true"], artifact_dir=tmp_path / "o", input_path=source,
+        ))
+
+
+def test_reparse_point_attribute_is_treated_as_link() -> None:
+    from types import SimpleNamespace
+    import stat as stat_mod
+
+    regular = stat_mod.S_IFREG | 0o644
+    plain = SimpleNamespace(st_mode=regular, st_file_attributes=0)
+    reparse = SimpleNamespace(
+        st_mode=regular, st_file_attributes=stat_mod.FILE_ATTRIBUTE_REPARSE_POINT
+    )
+    assert not hashing._is_link_or_reparse_point(plain)
+    assert hashing._is_link_or_reparse_point(reparse)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows feature")
+def test_windows_junction_parent_is_refused(tmp_path: Path) -> None:
+    import _winapi  # type: ignore[import-not-found]
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "f.txt").write_text("host secret")
+    root = tmp_path / "root"
+    root.mkdir()
+    _winapi.CreateJunction(str(outside), str(root / "d"))
+    with pytest.raises(UnsafeFileError):
+        hashing.sha256_file_beneath(root, Path("d/f.txt"))

@@ -36,9 +36,13 @@ jobs:
           /usr/bin/python3 -m venv .venv
           .venv/bin/pip install -e '.[dev]'
       - name: Run Stele suite (no skips allowed)
+        # `shell: bash` runs with -eo pipefail, so a failing pytest fails the
+        # step even though its output is piped through tee.
+        shell: bash
         run: |
           .venv/bin/python -m pytest tests -q -rs | tee pytest.log
-          if grep -q "SKIPPED" pytest.log; then
+          # Windows-only tests may skip here; nothing else may.
+          if grep "SKIPPED" pytest.log | grep -qv "Windows feature"; then
             echo "::error::tests were skipped on the containment runner"
             exit 1
           fi
