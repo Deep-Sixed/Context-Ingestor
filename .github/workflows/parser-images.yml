@@ -1,7 +1,7 @@
 name: Parser images
 
 # Builds each packaged parser image (roadmap #9, #10) in the trusted build
-# step, parses the representative documents through Stele, and runs the Phase E
+# step, parses the representative documents through Stele, and runs the
 # containment proofs against the image. Heavy (model weights, several GB), so
 # it runs only when the parser images or the code they depend on change.
 
@@ -14,7 +14,7 @@ on:
       - "stele/replay/**"
       - "tests/conftest.py"
       - "tests/test_parser_images.py"
-      - "tests/test_phase_e_containment.py"
+      - "tests/test_containment.py"
       - "tests/fixtures/documents/**"
       - ".github/workflows/parser-images.yml"
   push:
@@ -76,7 +76,7 @@ jobs:
         run: |
           export STELE_PROOF_IMAGES="$(.venv/bin/python -c \
             'from stele.parsers.catalog import get_parser; print(get_parser("${{ matrix.parser }}").image)')"
-          .venv/bin/python -m pytest tests/test_phase_e_containment.py -q -rs | tee proofs.log
+          .venv/bin/python -m pytest tests/test_containment.py -q -rs | tee proofs.log
           if grep -q "SKIPPED" proofs.log; then
             echo "::error::containment proofs were skipped"; exit 1
           fi

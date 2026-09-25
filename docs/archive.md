@@ -73,7 +73,7 @@ Records are serialized as canonical JSON: sorted keys, compact separators, UTF-8
 
 A Snapshot record contains only fields derived from the content. It is published after all of its blobs, so its presence means the Snapshot is complete in the store.
 
-A Source's `source_id` is the SHA-256 of its canonical record. Linking a Source to its Snapshots is a per-run fact: each ledger record stores its run's Snapshot digest (`source_hash`) and `source_id` (see [F-ledger.md](F-ledger.md)).
+A Source's `source_id` is the SHA-256 of its canonical record. Linking a Source to its Snapshots is a per-run fact: each ledger record stores its run's Snapshot digest (`source_hash`) and `source_id` (see [ledger.md](ledger.md)).
 
 ## Runs
 

@@ -10,7 +10,7 @@ from ..archive.records import SnapshotKind, is_digest
 
 
 class ArtifactState(str, Enum):
-    """Lifecycle states for a ledger record. See docs/F-ledger.md.
+    """Lifecycle states for a ledger record. See docs/ledger.md.
 
     States describe the integrity of the run's evidence only. Delivery to
     downstream targets is a separate set of facts (roadmap #13), so a SEALED
@@ -19,7 +19,7 @@ class ArtifactState(str, Enum):
     PENDING = "pending"          # hashed and recorded; bundle not yet archived
     SEALED = "sealed"            # bundle stored in the evidence archive and verified
     FAILED = "failed"            # parser or sealing failed; never becomes sealed
-    INVALIDATED = "invalidated"  # retroactively withdrawn (Phase G); terminal
+    INVALIDATED = "invalidated"  # retroactively withdrawn (see replay/); terminal
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,6 @@
 """Shared fixtures.
 
-containment_backend parametrizes the Phase E containment proofs over every
+containment_backend parametrizes the containment proofs over every
 registered sandbox backend that hosts processes (roadmap #5), so each new
 process backend must pass the same proofs. The OCI backend (roadmap #8) is also
 proved explicitly on Docker (the default prefers Podman) and with the opt-in
@@ -15,7 +15,7 @@ sandbox_python is the interpreter command for the chosen backend: bubblewrap
 exposes the host /usr, so it is the host interpreter; a container runs its
 image's own python3.
 
-The Phase E proofs run Python scripts, which only process backends can host.
+The containment proofs run Python scripts, which only process backends can host.
 Wasm backends prove the same guarantees with Wasm probe modules in
 tests/test_wasm_backend.py (wasm_backend fixture).
 """
@@ -29,6 +29,21 @@ import pytest
 
 from stele.containment import backend as backend_module
 from stele.containment.oci import OciBackend
+
+
+def pytest_configure(config) -> None:
+    # Match requires-python in pyproject.toml. An interpreter outside the
+    # project venv (e.g. a globally installed pytest) otherwise fails with
+    # misleading errors deep in the code, such as rmtree() rejecting onexc on
+    # Python 3.11.
+    if sys.version_info < (3, 12):
+        pytest.exit(
+            f"Stele requires Python >= 3.12, but pytest is running on "
+            f"{sys.version.split()[0]} ({sys.executable}). "
+            "Run `uv sync --extra dev`, then `uv run pytest`.",
+            returncode=4,
+        )
+
 
 _REGISTERED = backend_module.default_backends()
 _PROVED = [

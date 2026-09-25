@@ -1,8 +1,4 @@
-# Phase F — Deterministic Artifact Ledger
-
-**Status:** COMPLETE — 2026-06-26 · redesigned for roadmap #12 (sealed vs delivered, per-run records, parser identity)
-**Depends on:** Phase E, the evidence archive (`docs/archive.md`, #16)
-**Unblocks:** Phase G, durable dispatch (#13)
+# Artifact Ledger
 
 ## Goal
 
@@ -35,13 +31,13 @@ This is the one definition of ledger states. Other docs and code link here.
 | `pending` | The bundle is hashed and recorded; it is not yet archived. | `seal`, `fail`, `invalidate` |
 | `sealed` | Every artifact and the bundle's tree object are stored in the evidence archive and were verified against the recorded manifest. | `invalidate` |
 | `failed` | The parser failed, a check before sealing failed, or sealing failed. Never becomes sealed. | terminal |
-| `invalidated` | Withdrawn after the fact (Phase G). The record is kept. | terminal |
+| `invalidated` | Withdrawn after the fact (see [replay.md](replay.md)). The record is kept. | terminal |
 
 - **Sealed is integrity, not delivery.** A sealed record says nothing about
   whether any downstream target has received it. Delivery is a separate set
   of facts in the same database: an intent, then a receipt or a failure,
   per target, in the append-only delivery log (see
-  [H-adapter.md](H-adapter.md#dispatcher-and-the-delivery-log)). A delivery
+  [adapter.md](adapter.md#dispatcher-and-the-delivery-log)). A delivery
   failure never changes the ledger state.
 - **Only sealed records are delivered**, and invalidating one removes what it
   delivered (`Dispatcher.invalidate`).
@@ -166,7 +162,7 @@ raises `LedgerSchemaError`.
 - `stele/ledger/transaction.py` — `ledger_transaction`, `record_run`
 - `stele/ledger/migration.py` — migration from schema versions 0, 2, 3 and 4
 - `stele/ledger/delivery.py` — the delivery log (#13)
-- `tests/test_phase_f_ledger.py` — state machine, hashing, per-run records
+- `tests/test_ledger.py` — state machine, hashing, per-run records
 - `tests/test_ledger_provenance.py` — Snapshot provenance, parser identity, sealing, migration
 
 ## Completion criteria

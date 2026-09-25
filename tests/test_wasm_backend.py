@@ -5,7 +5,7 @@ Roadmap #7 — Wasm/WASI deterministic backend (Wasmtime).
     modules, never host processes, native libraries or GPUs.
   - Routing: deterministic Wasm parsers get Wasmtime, native-library parsers
     get bubblewrap, whatever the registry order.
-  - The Phase E containment proofs, restated for Wasm with a probe module:
+  - The containment proofs, restated for Wasm with a probe module:
     artifacts reach the host only through /stele/output; no path outside the
     preopens can be reached; exit status and output are captured; failed runs
     commit nothing; there is no network.
@@ -169,7 +169,7 @@ class TestRouting:
 
 
 # ---------------------------------------------------------------------------
-# Phase E proofs, restated for Wasm
+# Containment proofs, restated for Wasm
 # ---------------------------------------------------------------------------
 
 @pytest.mark.usefixtures("wasm_backend")

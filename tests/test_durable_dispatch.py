@@ -364,7 +364,7 @@ class TestInvalidationRemovesDeliveries:
         keep = _sealed(ledger, tmp_path, "unrelated\n")
         dispatcher = _dispatcher(ledger, target)
         dispatcher.dispatch(LinesAdapter(), record, WS)
-        dispatcher.dispatch(LinesAdapter(), record, HindsightTarget("jarvis"))
+        dispatcher.dispatch(LinesAdapter(), record, HindsightTarget("default"))
         dispatcher.dispatch(LinesAdapter(), keep, WS)
         assert len(target.rows) == 5
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "stele"
 version = "0.1.0"
-description = "Parser containment boundary and artifact ledger for EVECOR DataCore"
+description = "Sandboxed document-parser execution with a verifiable artifact ledger"
 requires-python = ">=3.12"
 dependencies = []
 

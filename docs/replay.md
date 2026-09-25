@@ -1,19 +1,15 @@
-# Phase G — Validation, Replay and Invalidation
-
-**Status:** COMPLETE — 2026-06-26 · true replay added for roadmap #14
-**Depends on:** Phase F, the evidence archive (#16), durable dispatch (#13), the Wasm backend (#7)
-**Unblocks:** Phase H
+# Validation, Replay and Invalidation
 
 Ledger states (`pending`, `sealed`, `failed`, `invalidated`) are defined once,
-in [F-ledger.md](F-ledger.md#state-machine).
+in [ledger.md](ledger.md#state-machine).
 
 ## Goal
 
-Any ingestion run recorded in the Phase F ledger must be checkable,
-replayable and invalidatable. This gives MetaRouter and downstream consumers
-confidence that artifacts have a known, recoverable provenance.
+Any ingestion run recorded in the ledger must be checkable,
+replayable and invalidatable. This gives downstream consumers confidence that
+artifacts have a known, recoverable provenance.
 
-Phase G has two distinct operations. They answer different questions and are
+There are two distinct operations. They answer different questions and are
 never reported as each other.
 
 | | Validation | Replay |
@@ -156,7 +152,7 @@ Given a `run_id` or `source_hash`:
    that wrote it, with a receipt per delivery (`Dispatcher.invalidate`, or
    `Dispatcher.retract_invalidated()` after the functions in
    `invalidation.py`, which only touch the ledger; see
-   [H-adapter.md](H-adapter.md#invalidation))
+   [adapter.md](adapter.md#invalidation))
 3. Invalidation is non-destructive to the ledger itself — record is kept
 
 ## Views
@@ -177,7 +173,7 @@ Given a `run_id` or `source_hash`:
 - `stele/replay/policy.py` — `ComparisonPolicy`, `JsonTolerancePolicy`
 - `stele/replay/engine.py` — `replay_record()`, `ReplayOutcome`, `ReplayLog`, `invalidate_diverged()`
 - `stele/extractors/__init__.py` — `CHATGPT_EXPORT_SPLIT_SPEC`, `EXTRACTOR_SPECS`
-- `tests/test_phase_g_replay.py` — validation, invalidation and views
+- `tests/test_replay.py` — validation, invalidation and views
 - `tests/test_replay_engine.py` — replay outcomes and the cross-platform harness
 
 ## Completion criteria
