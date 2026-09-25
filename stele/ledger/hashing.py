@@ -13,6 +13,22 @@ class UnsafeFileError(ValueError):
     """Raised when a path is not the regular file Stele expected to hash."""
 
 
+# Linux and macOS open every path component relative to its parent with
+# O_NOFOLLOW, which is race-free. Windows has neither O_NOFOLLOW nor dir_fd
+# support, so it falls back to lstat-checking each component and confirming the
+# opened file is the one that was checked. That fallback still refuses symlinks
+# and junctions but cannot exclude a swap between check and open.
+RACE_FREE_NOFOLLOW = (
+    hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_DIRECTORY")
+    and os.open in os.supports_dir_fd
+)
+
+# O_BINARY matters on Windows: os.open defaults to text mode there, which
+# would translate line endings and change the hash.
+_BINARY = getattr(os, "O_BINARY", 0)
+
+
 def _nofollow_flags(*, directory: bool = False) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
@@ -21,7 +37,7 @@ def _nofollow_flags(*, directory: bool = False) -> int:
     # O_NONBLOCK: opening a FIFO for reading otherwise blocks until a writer
     # appears, so a parser-planted FIFO would hang hashing forever. It has no
     # effect on reads from regular files, and the fstat check rejects FIFOs.
-    flags = os.O_RDONLY | nofollow | os.O_NONBLOCK
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | _BINARY
     if directory:
         directory_flag = getattr(os, "O_DIRECTORY", None)
         if directory_flag is None:
@@ -48,8 +64,9 @@ def sha256_file(path: Path) -> str:
     if not stat.S_ISREG(observed.st_mode):
         raise UnsafeFileError(f"path is not a regular file: {path}")
 
+    flags = _nofollow_flags() if hasattr(os, "O_NOFOLLOW") else os.O_RDONLY | _BINARY
     try:
-        fd = os.open(path, _nofollow_flags())
+        fd = os.open(path, flags)
     except FileNotFoundError:
         raise
     except OSError as exc:
@@ -82,6 +99,9 @@ def sha256_file_beneath(root: Path, relative_path: Path) -> str:
         raise UnsafeFileError(
             f"artifact path contains unsafe component: {relative_path}"
         )
+
+    if not RACE_FREE_NOFOLLOW:
+        return _sha256_beneath_by_lstat(root, relative_path)
 
     directory_fds: list[int] = []
     file_fd: int | None = None
@@ -144,6 +164,27 @@ def sha256_file_beneath(root: Path, relative_path: Path) -> str:
                 pass
 
 
+def _is_link_or_junction(path: Path, st: os.stat_result) -> bool:
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    return bool(isjunction and isjunction(path))
+
+
+def _sha256_beneath_by_lstat(root: Path, relative_path: Path) -> str:
+    """Fallback for platforms without O_NOFOLLOW/dir_fd (Windows)."""
+    current = root
+    for component in (None, *relative_path.parts[:-1]):
+        if component is not None:
+            current = current / component
+        st = os.lstat(current)
+        if _is_link_or_junction(current, st) or not stat.S_ISDIR(st.st_mode):
+            raise UnsafeFileError(
+                f"unsafe artifact directory component (link/non-directory): {current}"
+            )
+    return sha256_file(root / relative_path)
+
+
 def sha256_manifest(manifest: dict[str, str]) -> str:
     """Return a deterministic SHA-256 over a relative-path to file-hash manifest."""
     h = hashlib.sha256()
@@ -177,7 +218,9 @@ def build_manifest(artifact_dir: Path, artifact_paths: list[Path]) -> dict[str, 
                 f"artifact {path} contains an unsafe path relative to {artifact_dir}"
             )
 
-        manifest[str(relative)] = sha256_file_beneath(
+        # POSIX separators keep manifests (and artifact_hash) identical across
+        # operating systems; on Linux/macOS this is the same as str(relative).
+        manifest[relative.as_posix()] = sha256_file_beneath(
             artifact_dir,
             relative,
         )

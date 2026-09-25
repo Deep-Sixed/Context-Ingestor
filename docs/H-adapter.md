@@ -27,6 +27,14 @@ The adapter reads a committed artifact and returns typed chunks.  It never
 receives a DB handle, target connection, or writer reference.  All writes are
 owned by the Dispatcher.
 
+> **Trust note:** adapters run in the host process as trusted code. "Must not
+> write to any external store" is a contract, not an enforced capability
+> boundary — Python cannot stop an adapter from opening its own connections
+> (see `test_phase_h_adapter_contract.py`, side-channel test). Only parser
+> execution is sandboxed. The Dispatcher also does not yet check the record's
+> ledger state or call `on_invalidation()`; both are tracked for the
+> Snapshot/Extraction redesign.
+
 `SteleChunk` fields: `chunk_id`, `content`, `content_hash` (sha256 verified),
 `token_count`, `metadata`.
 

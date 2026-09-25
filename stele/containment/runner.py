@@ -32,6 +32,10 @@ from .sandbox import BubblewrapSandbox, SandboxConfig
 from .staging import stage_regular_file
 
 
+class SandboxUnavailableError(RuntimeError):
+    """Raised when the bubblewrap sandbox cannot run on this host."""
+
+
 def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
     """Execute config.command inside a bubblewrap sandbox and return the result.
 
@@ -81,6 +85,14 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
             exit_code = proc.returncode
             stdout = proc.stdout
             stderr = proc.stderr
+        except FileNotFoundError as exc:
+            if exc.filename not in (None, argv[0]):
+                raise
+            raise SandboxUnavailableError(
+                "Stele parser containment requires Linux bubblewrap (bwrap), "
+                "which was not found. On macOS or Windows, run Stele inside a "
+                "Linux VM or container (e.g. WSL2, Lima, Docker)."
+            ) from exc
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             exit_code = -1

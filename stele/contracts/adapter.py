@@ -123,9 +123,10 @@ class SteleAdapter(Protocol):
     committed ArtifactRecord (no DB handles, no target connections) and returns
     the chunks to be written.
 
-    on_invalidation() is called by the Dispatcher when a previously dispatched
+    on_invalidation() is intended to be called when a previously dispatched
     run_id is invalidated (Phase G).  Implementations must tombstone or remove
-    the data they previously wrote to their target store.
+    the data they previously wrote to their target store.  NOTE: the
+    Dispatcher does not call it yet — callers must invoke it themselves.
     """
 
     def transform(self, record: ArtifactRecord) -> list[SteleChunk]:

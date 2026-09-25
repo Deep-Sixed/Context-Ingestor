@@ -27,8 +27,18 @@ def collect_artifact_paths(artifact_dir: Path) -> list[Path]:
     if not stat.S_ISDIR(root_stat.st_mode):
         raise UnsafeArtifactError(f"artifact_dir is not a directory: {artifact_dir}")
 
+    def _unreadable(exc: OSError) -> None:
+        # os.walk silently skips directories it cannot list; a parser could
+        # chmod 000 a subdirectory to get a partial bundle recorded as whole.
+        raise UnsafeArtifactError(
+            f"unreadable artifact directory (parser-controlled permissions?): "
+            f"{exc.filename}: {exc.strerror}"
+        ) from exc
+
     artifacts: list[Path] = []
-    for root, dirnames, filenames in os.walk(artifact_dir, followlinks=False):
+    for root, dirnames, filenames in os.walk(
+        artifact_dir, onerror=_unreadable, followlinks=False
+    ):
         root_path = Path(root)
 
         for name in dirnames:

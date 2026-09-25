@@ -30,7 +30,7 @@ from typing import Generator
 
 from ..containment.result import SandboxResult
 from .models import ArtifactRecord
-from .store import LedgerStore
+from .store import InvalidStateTransitionError, LedgerStore
 
 
 class SandboxFailedError(Exception):
@@ -96,8 +96,28 @@ def ledger_transaction(
 
     try:
         yield record
-    except Exception as exc:
-        store.fail(record.record_id, error=repr(exc))
+    except BaseException as exc:
+        # BaseException: a Ctrl-C or SystemExit inside the block must not leave
+        # the record PENDING forever.
+        _fail_quietly(store, record.record_id, exc)
         raise
 
-    store.commit(record.record_id)
+    try:
+        store.commit(record.record_id)
+    except BaseException as exc:
+        # The block already ran (downstream writes may exist) but the bundle
+        # failed commit-time verification: record that outcome explicitly.
+        _fail_quietly(store, record.record_id, exc)
+        raise
+
+
+def _fail_quietly(store: LedgerStore, record_id: str, exc: BaseException) -> None:
+    """Mark record FAILED without masking the original exception.
+
+    If the record already left PENDING (e.g. invalidated concurrently), the
+    fail() transition is refused; the caller still sees the original error.
+    """
+    try:
+        store.fail(record_id, error=repr(exc))
+    except InvalidStateTransitionError:
+        pass

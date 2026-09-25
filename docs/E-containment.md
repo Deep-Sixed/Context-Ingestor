@@ -14,9 +14,22 @@ execution context. Parsers may not:
 
 ## Mechanism
 
-Use Linux namespaces + seccomp via `bubblewrap` (bwrap) to wrap parser
-invocations. Alternatively, a Docker-based sandbox with no volume mounts to
-production paths and no network access.
+Use Linux namespaces via `bubblewrap` (bwrap) to wrap parser invocations.
+Alternatively, a Docker-based sandbox with no volume mounts to production
+paths and no network access.
+
+### What is enforced today vs. still a goal
+
+| Goal | Status |
+|------|--------|
+| No filesystem access outside the sandbox layout | **Enforced** — mount namespace; only `/usr`, libs, staged input, script and `/stele/output` are visible; `/home`, `/mnt`, `/root`, `/run`, `/var`, `/tmp` are empty tmpfs |
+| No network | **Enforced** — `--unshare-net` (loopback only) |
+| No direct writes to production targets | **Enforced** — only `/stele/output` survives; everything else is ephemeral |
+| No subprocesses without an allowlist | **Not enforced** — parsers may exec any binary under the read-only `/usr`, still inside the same namespaces |
+| seccomp syscall filtering | **Not enforced** — no seccomp filter is passed to bwrap yet |
+
+Bubblewrap is Linux-only. On macOS and Windows the containment layer cannot
+run natively; use a Linux VM or container (e.g. WSL2, Lima, Docker Desktop).
 
 ## Inputs allowed inside sandbox
 
