@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
 from ..archive.store import BlobStore
@@ -43,29 +44,60 @@ class ComparisonPolicy(Protocol):
 
 
 @dataclass(frozen=True)
+class Tolerance:
+    """How far a replayed float may move: math.isclose(rel_tol, abs_tol)."""
+
+    rel_tol: float = 0.0
+    abs_tol: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.rel_tol < 0 or self.abs_tol < 0:
+            raise ValueError("tolerances must be non-negative")
+
+    def describe(self) -> dict[str, float]:
+        return {"rel_tol": self.rel_tol, "abs_tol": self.abs_tol}
+
+
+@dataclass(frozen=True)
 class JsonTolerancePolicy:
-    """Structural JSON comparison with numeric tolerance.
+    """Structural JSON comparison with numeric tolerance chosen per field.
 
     - Both runs must produce exactly the same set of files.
     - Files with identical digests match.
     - .json files (and .jsonl, line by line) are parsed and compared
       structurally: same keys (except ignore_keys, at any depth), same list
-      lengths, equal strings, booleans and nulls, equal integers, and
-      floats within math.isclose(rel_tol, abs_tol).
+      lengths, equal strings, booleans and nulls, and equal integers.
+    - A float is compared with the tolerance of its nearest enclosing key
+      named in key_tolerances (so every number inside "bbox": [...] or
+      "bbox": {"l": ...} uses the "bbox" rule), and with rel_tol/abs_tol
+      everywhere else. Coordinates can then absorb a fraction of a point
+      while scores and every unlisted number stay near-exact.
     - Any other file must be byte-identical.
     """
 
     rel_tol: float = 0.0
     abs_tol: float = 0.0
     ignore_keys: frozenset[str] = field(default_factory=frozenset)
+    key_tolerances: Mapping[str, Tolerance] = field(default_factory=dict)
 
     NAME = "json-tolerance"
-    VERSION = 1
+    # 2: per-key tolerances (key_tolerances); 1 applied one tolerance to
+    # every float.
+    VERSION = 2
 
     def __post_init__(self) -> None:
         if self.rel_tol < 0 or self.abs_tol < 0:
             raise ValueError("tolerances must be non-negative")
         object.__setattr__(self, "ignore_keys", frozenset(self.ignore_keys))
+        tolerances = dict(self.key_tolerances)
+        for key, tolerance in tolerances.items():
+            if not isinstance(key, str) or not isinstance(tolerance, Tolerance):
+                raise TypeError("key_tolerances maps key names to Tolerance")
+        object.__setattr__(self, "key_tolerances", MappingProxyType(tolerances))
+
+    @property
+    def default(self) -> Tolerance:
+        return Tolerance(self.rel_tol, self.abs_tol)
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -74,6 +106,9 @@ class JsonTolerancePolicy:
             "rel_tol": self.rel_tol,
             "abs_tol": self.abs_tol,
             "ignore_keys": sorted(self.ignore_keys),
+            "key_tolerances": {
+                key: self.key_tolerances[key].describe() for key in sorted(self.key_tolerances)
+            },
         }
 
     def compare(
@@ -105,26 +140,29 @@ class JsonTolerancePolicy:
         except (UnicodeDecodeError, ValueError) as exc:
             return [f"not comparable as JSON: {path}: {exc}"]
         findings: list[str] = []
-        self._walk(left, right, path, findings)
+        self._walk(left, right, path, self.default, findings)
         return findings
 
-    def _walk(self, a: Any, b: Any, where: str, findings: list[str]) -> None:
+    def _walk(self, a: Any, b: Any, where: str, tol: Tolerance, findings: list[str]) -> None:
         if isinstance(a, dict) and isinstance(b, dict):
             keys_a = {k for k in a if k not in self.ignore_keys}
             keys_b = {k for k in b if k not in self.ignore_keys}
             for key in sorted(keys_a ^ keys_b):
                 findings.append(f"key only on one side: {where}/{key}")
             for key in sorted(keys_a & keys_b):
-                self._walk(a[key], b[key], f"{where}/{key}", findings)
+                inner = self.key_tolerances.get(key, tol)
+                self._walk(a[key], b[key], f"{where}/{key}", inner, findings)
         elif isinstance(a, list) and isinstance(b, list):
             if len(a) != len(b):
                 findings.append(f"length {len(a)} != {len(b)}: {where}")
                 return
             for i, (x, y) in enumerate(zip(a, b)):
-                self._walk(x, y, f"{where}[{i}]", findings)
+                self._walk(x, y, f"{where}[{i}]", tol, findings)
         elif _is_number(a) and _is_number(b) and (isinstance(a, float) or isinstance(b, float)):
-            if not math.isclose(a, b, rel_tol=self.rel_tol, abs_tol=self.abs_tol):
-                findings.append(f"{a!r} != {b!r} beyond tolerance: {where}")
+            if not math.isclose(a, b, rel_tol=tol.rel_tol, abs_tol=tol.abs_tol):
+                findings.append(
+                    f"{a!r} != {b!r} beyond tolerance (rel {tol.rel_tol}, abs {tol.abs_tol}): {where}"
+                )
         elif type(a) is not type(b) or a != b:
             findings.append(f"{a!r} != {b!r}: {where}")
 

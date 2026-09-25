@@ -24,12 +24,13 @@ from ..archive.records import Snapshot, SnapshotKind, Source, canonical_json
 from ..archive.store import BlobStore, MissingObjectError
 from .events import EVENTS_DDL, append_event, record_body, write_transaction
 from .hashing import UnsafeFileError, build_manifest, sha256_manifest
-from .models import ArtifactRecord, ArtifactState, ParserIdentity
+from .models import ArtifactRecord, ArtifactState, ParserIdentity, RunConditions
 
 # PRAGMA user_version of the current schema. 0 is a pre-#12 ledger (or an
 # empty database), 2 has records only, 3 adds the delivery log (#13), 4 the
-# replay log (#14), 5 the hash-chained event log; see stele/ledger/migration.py.
-SCHEMA_VERSION = 5
+# replay log (#14), 5 the run conditions column (#30), 6 the hash-chained
+# event log; see stele/ledger/migration.py.
+SCHEMA_VERSION = 6
 
 _DDL = (
     """
@@ -55,6 +56,7 @@ _DDL = (
         finalized_at         TEXT,
         error                TEXT,
         legacy_source_hash   TEXT,            -- unverified, pre-#12 ledgers only
+        run_conditions       TEXT,            -- canonical JSON: device and limits (#30)
         CHECK ((source_hash IS NULL) = (source_kind IS NULL)),
         CHECK ((parser_name IS NULL) = (parser_version IS NULL)),
         CHECK ((parser_name IS NULL) = (parser_config IS NULL))
@@ -63,6 +65,12 @@ _DDL = (
     "CREATE INDEX idx_artifact_hash ON artifact_records(artifact_hash)",
     "CREATE INDEX idx_source_hash ON artifact_records(source_hash)",
     "CREATE INDEX idx_parser ON artifact_records(parser_name, parser_version)",
+)
+
+# Schema version 4 → 5 (roadmap #30): the device and limits a run executed
+# under. Existing records keep NULL: their conditions were never recorded.
+RUN_CONDITIONS_DDL = (
+    "ALTER TABLE artifact_records ADD COLUMN run_conditions TEXT",
 )
 
 # The delivery log (roadmap #13, stele/ledger/delivery.py). A delivery is one
@@ -180,6 +188,10 @@ def _row_to_record(row: sqlite3.Row) -> ArtifactRecord:
         finalized_at=_dt(row["finalized_at"]),
         error=row["error"],
         legacy_source_hash=row["legacy_source_hash"],
+        run_conditions=(
+            RunConditions.from_dict(json.loads(row["run_conditions"]))
+            if row["run_conditions"] is not None else None
+        ),
     )
 
 
@@ -360,6 +372,7 @@ class LedgerStore:
         input_snapshot: Snapshot | None = None,
         source: Source | None = None,
         backend: str | None = None,
+        run_conditions: RunConditions | None = None,
     ) -> ArtifactRecord:
         """Record one run's artifact bundle as PENDING.
 
@@ -381,6 +394,12 @@ class LedgerStore:
         if not isinstance(parser, ParserIdentity):
             raise TypeError("parser must be a ParserIdentity")
         config_json = canonical_parser_config(parser_config)
+        if run_conditions is not None and not isinstance(run_conditions, RunConditions):
+            raise TypeError("run_conditions must be a RunConditions")
+        conditions_json = (
+            canonical_json(run_conditions.to_dict()).decode("utf-8")
+            if run_conditions is not None else None
+        )
 
         source_hash = source_kind = source_id = source_path = None
         if input_snapshot is not None:
@@ -412,6 +431,7 @@ class LedgerStore:
             "parser_config": config_json, "backend": backend,
             "artifact_dir": str(artifact_dir), "artifact_manifest": json.dumps(manifest),
             "artifact_hash": artifact_hash, "created_at": _now_iso(),
+            "run_conditions": conditions_json,
         }
         try:
             # The record and its record.created event commit together.
@@ -552,8 +572,10 @@ class LedgerStore:
         version: str | None = None,
         *,
         parser_config: Mapping[str, Any] | None = None,
+        device: str | None = None,
     ) -> list[ArtifactRecord]:
-        """Runs of a parser, optionally of one version and one exact config."""
+        """Runs of a parser, optionally of one version, one exact config, and
+        one device ("cpu" or "gpu"; records without run conditions never match)."""
         clauses, params = ["parser_name=?"], [name]
         if version is not None:
             clauses.append("parser_version=?")
@@ -561,6 +583,9 @@ class LedgerStore:
         if parser_config is not None:
             clauses.append("parser_config=?")
             params.append(canonical_parser_config(parser_config))
+        if device is not None:
+            clauses.append("json_extract(run_conditions, '$.device')=?")
+            params.append(RunConditions(device=device).device)
         return self._select(" AND ".join(clauses), tuple(params))
 
     def list_by_states(self, states: list[ArtifactState]) -> list[ArtifactRecord]:

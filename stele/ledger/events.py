@@ -260,10 +260,13 @@ def verify_ledger(ledger: LedgerStore, *, anchor: tuple[int, str] | None = None)
                 "module_sha256": row["parser_module_sha256"],
             }
             config = None if row["parser_config"] is None else json.loads(row["parser_config"])
+            conditions = (
+                None if row["run_conditions"] is None else json.loads(row["run_conditions"])
+            )
             actual = {
                 "run_id": row["run_id"], "artifact_hash": row["artifact_hash"],
                 "source_hash": row["source_hash"], "parser": parser,
-                "parser_config": config, "state": row["state"],
+                "parser_config": config, "run_conditions": conditions, "state": row["state"],
             }
             for key in sorted(want):
                 if actual[key] != want[key]:
@@ -317,6 +320,7 @@ def _apply(
             "run_id": b["run_id"], "artifact_hash": b["artifact_hash"],
             "source_hash": b.get("source_hash"),
             "parser": b.get("parser"), "parser_config": b.get("parser_config"),
+            "run_conditions": b.get("run_conditions"),
             "state": b.get("state", "pending"),
         }
     elif ev.kind in _RECORD_STATE:
@@ -354,6 +358,11 @@ def record_body(row: sqlite3.Row | dict[str, Any], *, with_state: bool = False) 
         "parser": parser,
         "parser_config": None if row["parser_config"] is None else json.loads(row["parser_config"]),
         "backend": row["backend"],
+        # The device and limits the run executed under (#30); replays use
+        # them, so they are committed to like the parser identity.
+        "run_conditions": (
+            None if row["run_conditions"] is None else json.loads(row["run_conditions"])
+        ),
     }
     if with_state:
         body["state"] = row["state"]

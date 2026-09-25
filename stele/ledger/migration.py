@@ -2,9 +2,11 @@
 Migrating older ledgers to the current schema.
 
 Version 2 (#12) → 3 (#13) adds the delivery log tables, 3 → 4 (#14) the
-replay log, and 4 → 5 the hash-chained event log. None touches existing rows;
-reaching 5 logs every existing record, delivery and replay as an *.imported
-event, so the chain covers the ledger from the migration on.
+replay log, 4 → 5 (#30) the run_conditions column, NULL for existing
+records (their device and limits were never recorded), and 5 → 6 the
+hash-chained event log. None touches existing rows; reaching 6 logs every
+existing record, delivery and replay as an *.imported event, so the chain
+covers the ledger from the migration on.
 
 Version 0 is a pre-#12 ledger.
 
@@ -40,6 +42,7 @@ from .hashing import UnsafeFileError
 from .store import (
     DELIVERY_DDL,
     REPLAY_DDL,
+    RUN_CONDITIONS_DDL,
     ArtifactDriftError,
     MissingArtifactError,
     archive_bundle,
@@ -59,9 +62,9 @@ _V0_COLUMNS = {
 
 def migrate_to_current(conn: sqlite3.Connection, version: int, archive: BlobStore) -> None:
     """Migrate in place. The caller holds a BEGIN IMMEDIATE transaction."""
-    # version → DDL that reaches version + 1. Reaching 5 creates the event
+    # version → DDL that reaches version + 1. Reaching 6 creates the event
     # log, which then records the state found as *.imported events.
-    additive = {2: DELIVERY_DDL, 3: REPLAY_DDL, 4: EVENTS_DDL}
+    additive = {2: DELIVERY_DDL, 3: REPLAY_DDL, 4: RUN_CONDITIONS_DDL, 5: EVENTS_DDL}
     if version in additive:
         while version in additive:
             for statement in additive[version]:

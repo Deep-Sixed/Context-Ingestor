@@ -216,6 +216,13 @@ class _Replay:
         spec = self.catalog.get(parser.name, parser.version)
         if spec is None:
             raise _Unreplayable(f"parser {parser.name} {parser.version} is not in the catalog")
+        if spec.with_conditions is not None:
+            # Run the parser on the device and under the limits it was
+            # recorded with (e.g. the GPU image for a GPU run).
+            try:
+                spec = spec.with_conditions(self.record.run_conditions)
+            except ValueError as exc:
+                raise _Unreplayable(f"cannot run the parser as recorded: {exc}") from exc
         if not spec.deterministic and spec.policy is None:
             raise _Unreplayable(
                 f"parser {parser.name} {parser.version} is not deterministic and has no "

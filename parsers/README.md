@@ -92,11 +92,15 @@ scripts refuse to run (status 3) without it.
 records a successful run under the parser's name, version, measured image
 digest and merged configuration. The Source is required: the parsers choose
 their reader by the file suffix, and the replay must give the document its
-original name. `replay_spec(parser)` lets the replay engine
-(`docs/replay.md`) run it again on the recorded document. ML parsers are not
-deterministic, so a replay is judged by the parser's `comparison` policy:
-`EQUIVALENT` or `DIVERGED`, never `REPRODUCED`. It is `UNREPLAYABLE` when the
-image is not present locally or no longer has the recorded digest.
+original name. The record also keeps the run's device (CPU or GPU image) and
+limits. `replay_spec(parser)` lets the replay engine (`docs/replay.md`) run
+it again on the recorded document, on the recorded device's image and under
+the recorded limits. ML parsers are not deterministic, so a replay is judged
+by the parser's `comparison` policy: coordinates may move by half a point or
+pixel, model scores by 1e-3, every other number and all text must match
+(`EQUIVALENT` or `DIVERGED`, never `REPRODUCED`). It is `UNREPLAYABLE` when
+the image is not present locally, no longer has the recorded digest, or the
+recorded device (a GPU) is not available here.
 
 ## Exit statuses
 

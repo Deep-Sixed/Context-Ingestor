@@ -55,7 +55,11 @@ The sealed bundle in the archive is unaffected by working-copy drift.
    input's original file name, and checks the staged bytes hash to it.
 4. Re-runs the parser with the recorded `parser_config`, through the same
    `run_parser()` path that produced the record, on a backend with the
-   capabilities the spec requires. The replay's output is stored in the archive.
+   capabilities the spec requires. A spec with `with_conditions` is first
+   specialized to the record's `run_conditions` (#30): the recorded device
+   (CPU or GPU image) and limits. A recorded device that is not available
+   here (no usable GPU) makes the replay `UNREPLAYABLE`; it never falls back
+   to another device. The replay's output is stored in the archive.
 5. Compares the new artifact digests with the recorded manifest.
 6. Appends the result to the append-only replay log. The record itself is
    never modified by a replay.
@@ -87,25 +91,40 @@ parameters) is written to the replay log with every verdict.
 - A non-deterministic parser without a policy is always `UNREPLAYABLE`:
   nothing defines what agreement means for it.
 
-`JsonTolerancePolicy(rel_tol, abs_tol, ignore_keys)` is the built-in
-structural policy:
+`JsonTolerancePolicy(rel_tol, abs_tol, ignore_keys, key_tolerances)` is the
+built-in structural policy (version 2):
 - both runs must produce the same set of files;
-- `.json` / `.jsonl` files are compared structurally, with floats within
-  tolerance and `ignore_keys` (e.g. timestamps) skipped at any depth;
+- `.json` / `.jsonl` files are compared structurally: same keys (except
+  `ignore_keys`, e.g. timestamps, at any depth), same list lengths, equal
+  strings, booleans, nulls and integers;
+- a float is compared with the `Tolerance` of its **nearest enclosing key**
+  named in `key_tolerances` (every number inside `"bbox": [...]` or
+  `"bbox": {"l": ...}` uses the `bbox` rule), and with `rel_tol`/`abs_tol`
+  everywhere else;
 - every other file must be byte-identical.
 
+`describe()` lists every rule, and each verdict in the replay log records it.
+
 The packaged ML parsers (MinerU, Marker, Docling; `stele/parsers/catalog.py`)
-each carry `ML_REPLAY_POLICY`:
-- `abs_tol=0.5` on coordinates in points or pixels, which absorbs float noise
-  from thread-order effects but not a moved block;
-- `rel_tol=1e-6`;
-- `device` ignored in `stele-parser.json`;
-- text must match exactly.
+each carry `ML_REPLAY_POLICY` (#29):
+
+| Fields | Tolerance | Why |
+|---|---|---|
+| `bbox`, `poly`, `polygon`, `page_size`, `size` | `abs_tol=0.5` | Coordinates in points or pixels: absorbs float noise from thread-order effects, not a moved block |
+| `score`, `confidence` | `abs_tol=1e-3` | Model scores in [0, 1]: a real change in confidence is `DIVERGED` |
+| every other number | `rel_tol=1e-6`, `abs_tol=1e-9` | Near-exact |
+
+Integers (page numbers, character spans) and text must match exactly, and
+`device` in `stele-parser.json` is ignored.
 
 `stele.parsers.replay.record_parser_run(ledger, run, source=...)` records a
 packaged-parser run in the ledger; the Source is required so the replay can
-give the document its original name (the parsers pick their reader by suffix). `replay_spec(parser)` replays it on the CPU image through the same
-command and configuration environment as `run_parser()`. The parser-images
+give the document its original name (the parsers pick their reader by suffix).
+It also records the run's `run_conditions`: the device and the memory, CPU,
+PID and time limits Stele applied. `replay_spec(parser)` replays it through
+the same command and configuration environment as `run_parser()`, on the
+recorded device's image and under the recorded limits (the parser's defaults
+on the CPU image for a record without conditions). The parser-images
 workflow replays a real document through each built image and expects
 `EQUIVALENT`.
 

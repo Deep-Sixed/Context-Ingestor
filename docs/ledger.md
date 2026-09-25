@@ -70,6 +70,7 @@ A second record for the same `run_id` raises `DuplicateRunError`.
 | `parser` | `ParserIdentity`: `name`, `version`, and the executable's digest: `image_digest` (OCI backend) or `module_sha256` (Wasm backends). The digests are measured by the run, not asserted by the caller. |
 | `parser_config` | The configuration passed to the parser, stored as canonical JSON |
 | `backend` | Sandbox backend that ran the parser |
+| `run_conditions` | `RunConditions`: the `device` (`cpu` or `gpu`) and the `memory`, `cpus`, `pids_limit` and `timeout_seconds` the run executed under. Recorded by Stele's runner (`record_parser_run`), so a replay runs the parser the same way (#30). `None` for runs recorded without them and for records made before schema version 5. |
 | `artifact_dir` | Host path of the run's output directory (a location, not evidence) |
 | `artifact_manifest` | `{relative POSIX path: sha256}` for every artifact |
 | `artifact_hash` | Digest of the bundle's tree object in the archive (`sha256_manifest(manifest)`) |
@@ -79,7 +80,8 @@ A second record for the same `run_id` raises `DuplicateRunError`.
 | `legacy_source_hash` | Only on records migrated from a pre-#12 ledger: a caller-supplied source hash that matched no Snapshot. Unverified; never used as provenance. |
 
 Queries: `get`, `get_by_run_id`, `find_by_artifact_hash`, `find_by_source_hash`,
-`find_by_parser(name, version=None, parser_config=None)` and `list_by_states`.
+`find_by_parser(name, version=None, parser_config=None, device=None)` and
+`list_by_states`.
 
 ## Recording a run
 
@@ -128,12 +130,15 @@ In each case the record stays `pending` (and `ledger_transaction` marks it
 ## Storage and migration
 
 SQLite in WAL mode, with a schema that maps 1:1 to Postgres. The schema
-version is `PRAGMA user_version` (currently 5: records, the delivery log
-added by #13, the replay log added by #14, and the hash-chained event log).
-Opening a ledger of an older version migrates it in one write transaction
-(`stele/ledger/migration.py`): either the migration completes or the database
-is left unchanged. Versions 2 → 3 → 4 → 5 only add tables. Reaching 5 logs
-every existing record, delivery and replay as an `*.imported` event.
+version is `PRAGMA user_version` (currently 6: records, the delivery log
+added by #13, the replay log added by #14, the `run_conditions` column added
+by #30, and the hash-chained event log). Opening a ledger of an older version
+migrates it in one write transaction (`stele/ledger/migration.py`): either the
+migration completes or the database is left unchanged. Versions 2 → 3 → 4 → 5
+→ 6 only add the delivery log, the replay log, the `run_conditions` column
+(NULL for existing records: their conditions were never recorded) and the event
+log. Reaching 6 logs every existing record, delivery and replay as an
+`*.imported` event.
 
 Migrating a pre-#12 (version 0) ledger:
 

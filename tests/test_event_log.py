@@ -285,7 +285,7 @@ def test_migration_logs_existing_state(tmp_path: Path) -> None:
 
     conn = _raw(ledger)
     conn.execute("DROP TABLE events")
-    conn.execute("PRAGMA user_version = 4")
+    conn.execute("PRAGMA user_version = 5")  # v5: run conditions (#30), no event log yet
     conn.close()
 
     migrated = open_ledger(db)
@@ -304,7 +304,7 @@ def test_migration_logs_existing_state(tmp_path: Path) -> None:
     migrated.invalidate(ids["sealed"], "later")
     assert verify_ledger(migrated).ok
     c = sqlite3.connect(db)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
     c.close()
 
 
