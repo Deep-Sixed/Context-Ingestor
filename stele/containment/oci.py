@@ -27,6 +27,7 @@ import subprocess
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from .backend import (
@@ -428,6 +429,16 @@ class OciBackend(SandboxBackend):
         return outcome
 
     def _run(self, argv: list[str], engine: str, container_name: str, timeout: int) -> ExecutionOutcome:
+        # The engine runs from a private, empty working directory: Podman's
+        # conmon writes an "oom" marker file into its working directory when
+        # the container is OOM-killed, which would otherwise land in the
+        # caller's current directory.
+        with TemporaryDirectory(prefix="stele-engine-") as workdir:
+            return self._run_in(argv, engine, container_name, timeout, workdir)
+
+    def _run_in(
+        self, argv: list[str], engine: str, container_name: str, timeout: int, workdir: str
+    ) -> ExecutionOutcome:
         t0 = time.monotonic()
         try:
             proc = subprocess.run(
@@ -436,6 +447,7 @@ class OciBackend(SandboxBackend):
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                cwd=workdir,
             )
         except FileNotFoundError as exc:
             if exc.filename not in (None, argv[0]):

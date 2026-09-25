@@ -1,0 +1,71 @@
+# Stele parser image: MinerU (roadmap #9). NVIDIA GPU build.
+#
+# Untested on real GPU hardware: the hosted CI runners have none. Uses the
+# PyTorch small-model backend (CUDA 13 wheels from PyPI, which bundle the CUDA
+# runtime); the host needs an NVIDIA driver and the container toolkit (CDI).
+#
+# Build from the repository root (the trusted acquisition step; this is the
+# only time anything is downloaded):
+#
+#   docker build -f parsers/mineru/Containerfile.gpu -t localhost/stele/mineru-gpu:4.0.7 parsers
+#
+# Build args:
+#   MINERU_TIERS  "basic" (default): layout/OCR/formula/table models, torch.
+#   MODEL_SOURCE  huggingface (default) or modelscope.
+#   SKIP_MODELS   1 to build without weights (for testing the missing-model
+#                 failure; such an image refuses to parse).
+
+# python:3.12-slim (Debian bookworm), pinned by digest.
+FROM docker.io/library/python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Native libraries OpenCV and pdfium load at run time.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Every Python dependency pinned by version and hash (uv pip compile
+# --generate-hashes, see parsers/README.md).
+COPY mineru/requirements-gpu.txt /opt/stele/requirements.txt
+RUN pip install --require-hashes --no-deps -r /opt/stele/requirements.txt
+
+# Model weights: fetched here, at build time, and nowhere else. The build
+# args are declared here so changing them reuses the dependency layers above.
+ARG MINERU_TIERS=basic
+ARG MODEL_SOURCE=huggingface
+ARG SKIP_MODELS=0
+ENV MINERU_MODEL_BASE_DIR=/opt/mineru/models \
+    MINERU_MODEL_SMALL_BACKEND=torch \
+    MINERU_MODEL_VLM_ENGINE=llama-cpp
+# MinerU takes a file lock under the model directory even when the models are
+# present, so its lock directory is a link to the per-run /tmp (the image root
+# is read-only at run time).
+RUN if [ "$SKIP_MODELS" != "1" ]; then \
+      for tier in $MINERU_TIERS; do \
+        MINERU_HOME=/tmp/mineru-build mineru-kit models download --tier "$tier" --source "$MODEL_SOURCE" || exit 1; \
+      done; \
+    fi \
+ && mkdir -p /opt/mineru/models \
+ && rm -rf /opt/mineru/models/.locks \
+ && ln -s /tmp/mineru-locks /opt/mineru/models/.locks \
+ && chmod -R a+rX,go-w /opt/mineru \
+ && rm -rf /tmp/mineru-build /root/.cache
+
+COPY common/stele_entry.py mineru/entry.py /opt/stele/
+
+# Run time: models from the image only, no telemetry, scratch state on the
+# per-run tmpfs (/tmp is the only writable path besides /stele/output).
+ENV MINERU_MODEL_SOURCE=local \
+    MINERU_HOME=/tmp/mineru \
+    HOME=/tmp \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    DO_NOT_TRACK=1
+
+USER 65534:65534
+CMD ["python3", "/opt/stele/entry.py"]

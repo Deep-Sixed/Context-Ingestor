@@ -74,9 +74,11 @@ Stele/
 │   ├── containment/
 │   ├── archive/            ← content-addressed evidence store (#16)
 │   ├── extractors/         ← Wasm extractors (run on the Wasmtime backend)
+│   ├── parsers/            ← packaged ML parsers in pinned images (#9, #10)
 │   ├── ledger/
 │   ├── replay/
 │   └── contracts/
+├── parsers/                ← parser image build files (MinerU)
 ├── tests/
 ├── pyproject.toml
 └── uv.lock

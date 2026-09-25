@@ -26,7 +26,7 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from .artifacts import collect_artifact_paths
+from .artifacts import collect_artifact_paths, discard_artifact_dir_contents
 from .backend import (
     BWRAP_MISSING as _BWRAP_MISSING,
     ParserRequirements,
@@ -63,6 +63,7 @@ def run_in_sandbox(
     requirements: ParserRequirements | None = None,
     backend: SandboxBackend | None = None,
     store: BlobStore | None = None,
+    discard_failed_output: bool = False,
 ) -> SandboxResult:
     """Execute config.command in a sandbox and return the result.
 
@@ -85,6 +86,12 @@ def run_in_sandbox(
     Snapshot before the parser runs (the staging copy is deleted afterwards),
     and every collected artifact is stored by digest, together with a tree
     object over the artifact manifest. Paths in the result stay locations only.
+
+    With discard_failed_output=True, a run that did not succeed (non-zero exit,
+    timeout, or a kill such as the memory limit) keeps nothing it wrote: the
+    artifact directory is emptied, no artifacts are collected, and nothing is
+    stored, so a partial extraction can never be recorded. The input Snapshot
+    is still archived, since it records what the parser was given.
     """
     if store is not None:
         from ..archive.ingest import ingest_artifacts, snapshot_staged_input
@@ -125,10 +132,15 @@ def run_in_sandbox(
         if staging is not None:
             staging.cleanup()
 
-    artifact_paths = collect_artifact_paths(config.artifact_dir)
+    failed = outcome.exit_code != 0 or outcome.timed_out
+    if discard_failed_output and failed:
+        discard_artifact_dir_contents(config.artifact_dir)
+        artifact_paths: list[Path] = []
+    else:
+        artifact_paths = collect_artifact_paths(config.artifact_dir)
     artifact_digests: dict[str, str] = {}
     artifact_bundle_digest: str | None = None
-    if store is not None:
+    if store is not None and not (discard_failed_output and failed):
         artifact_digests = ingest_artifacts(store, config.artifact_dir, artifact_paths)
         artifact_bundle_digest = store.put_tree(artifact_digests)
 

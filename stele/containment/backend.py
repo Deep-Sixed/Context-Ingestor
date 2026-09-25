@@ -70,6 +70,10 @@ class ParserRequirements:
     deterministic: bool = False
     # The parser is a WebAssembly module rather than a host executable.
     wasm_module: bool = False
+    # Memory/CPU/PID caps must actually be enforced (not merely requested), so
+    # a large or hostile document cannot exhaust the host. Heavy ML parsers
+    # (roadmap #9, #10) set this.
+    resource_limits: bool = False
 
     def required_capabilities(self) -> frozenset[Capability]:
         needed = set(BASELINE_CAPABILITIES)
@@ -80,6 +84,8 @@ class ParserRequirements:
             needed.add(Capability.NATIVE_LIBS)
         if self.deterministic:
             needed.add(Capability.DETERMINISTIC)
+        if self.resource_limits:
+            needed.add(Capability.RESOURCE_LIMITS)
         return frozenset(needed)
 
 
