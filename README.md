@@ -50,6 +50,13 @@ codebases that handle hostile input. Stele treats every parser as untrusted:
   pointer in the sealed bundle. A trusted resolver re-reads every anchor from
   the archive and refuses any unit whose text doesn't match.
   `ExtractionAdapter` delivers the units through the Dispatcher.
+- **Sign off a new sandbox setup on the whole corpus.** `stele.verification`
+  pins a corpus by content and runs every document through today's baseline
+  (bubblewrap) and each candidate backend. Its report re-checks every sealed
+  run against the ledger, archive and corpus, compares each candidate with
+  the baseline and applies explicit gates. A named person's sign-off is
+  anchored in the event log, and goes stale if a record it covers is later
+  invalidated.
 
 ```
 source ─▶ staging ─▶ sandboxed parser ─▶ /stele/output ─▶ ledger (pending)
@@ -155,6 +162,7 @@ Details and known limits: [docs/containment.md](docs/containment.md).
 | [Ledger](docs/ledger.md) | State machine, record fields, parser identity, migration, the hash-chained event log |
 | [Replay](docs/replay.md) | Validation, replay outcomes, invalidation, ledger views |
 | [Adapter contract](docs/adapter.md) | `SteleAdapter`, `TargetWriter`, the Dispatcher and delivery log, the ChatGPT export adapter |
+| [Production verification](docs/verification.md) | Corpus manifests, campaigns, the gated report, sign-off |
 | [Extraction contract](docs/extraction.md) | `stele.extraction` v1, normalizers, the trusted resolver, `ExtractionAdapter` |
 | [Identity contract](docs/identity.md) | `stele:` references to sources, snapshots, records, observations, anchors and events, and how they resolve |
 | [Evidence store](docs/archive.md) | Content-addressed Snapshot and artifact archive |
@@ -171,6 +179,7 @@ stele/
 ├── replay/        validation, replay engine, invalidation, views
 ├── contracts/     adapter, dispatcher and target-writer protocols
 ├── adapters/      adapters (ChatGPT export: every branch, streamed; canonical extraction)
+├── verification/  full-corpus production verification and sign-off
 ├── extraction/    stele.extraction v1 contract, normalizers, trusted resolver
 ├── extractors/    deterministic Wasm extractors
 └── parsers/       packaged ML parsers in pinned images
