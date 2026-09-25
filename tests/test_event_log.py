@@ -115,6 +115,22 @@ class TestChain:
         assert sealed.body == {"artifact_hash": created.body["artifact_hash"]}
         assert log.for_subject(ids["withdrawn"])[-1].body == {"reason": "superseded"}
 
+    def test_bound_intents_and_unwritten_failures_are_events(self, ledger, tmp_path) -> None:
+        from stele.ledger.delivery import DeliveryLog, PayloadConflictError
+
+        record = ledger.seal(_pending(ledger, tmp_path).record_id)
+        log = DeliveryLog(ledger)
+        dispatch_id = log.open_delivery(record.record_id, LightRAGTarget("docs"))
+        log.append_intent(dispatch_id, [make_chunk("a", "one")])
+        with pytest.raises(PayloadConflictError):
+            log.append_intent(dispatch_id, [make_chunk("a", "two")])   # refused: logs nothing
+        log.append_unwritten_failure(dispatch_id, "adapter crashed")
+        log.close()
+        bodies = [e.body for e in EventLog(ledger).for_subject(dispatch_id)
+                  if e.kind == "delivery.event"]
+        assert [(b["event"], b["done"]) for b in bodies] == [("intent", None), ("failure", None)]
+        assert verify_ledger(ledger).ok
+
     def test_chain_links_and_verifies(self, ledger, tmp_path) -> None:
         _lifecycle(ledger, tmp_path)
         log = EventLog(ledger)
@@ -285,7 +301,7 @@ def test_migration_logs_existing_state(tmp_path: Path) -> None:
 
     conn = _raw(ledger)
     conn.execute("DROP TABLE events")
-    conn.execute("PRAGMA user_version = 5")  # v5: run conditions (#30), no event log yet
+    conn.execute("PRAGMA user_version = 6")  # v6: payload binding (#35), no event log yet
     conn.close()
 
     migrated = open_ledger(db)
@@ -304,7 +320,7 @@ def test_migration_logs_existing_state(tmp_path: Path) -> None:
     migrated.invalidate(ids["sealed"], "later")
     assert verify_ledger(migrated).ok
     c = sqlite3.connect(db)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
+    assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
     c.close()
 
 

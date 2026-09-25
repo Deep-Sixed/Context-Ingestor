@@ -15,6 +15,11 @@ failure):
     removal_receipt  removal returned; done = chunks removed, NULL if unknown
     removal_failure  removal failed
 
+A delivery writes exactly one payload. Its first intent binds the
+delivery to that payload's chunks_digest; a retry, or a concurrent dispatch of
+the same record to the same target, must present the same payload or it is
+refused before its writer is called (append_intent, backed by a trigger).
+
 A crash at any point therefore leaves a log that bounds what the target
 holds: an intent without an outcome means the target may hold anything from
 none to all of the planned chunks, under that dispatch_id. The log lives in
@@ -150,10 +155,49 @@ class Delivery:
         )
 
 
+class PayloadConflictError(ValueError):
+    """A delivery's intent named a different payload than its first intent."""
+
+
+# Digests written before schema 6 covered only chunk ids and content hashes;
+# they are bare hex. Current digests carry this prefix.
+_DIGEST_PREFIX = "chunks-v2:"
+
+
 def chunks_digest(chunks: list[Any]) -> str:
-    """Digest identifying a chunk list by its ids and content hashes."""
+    """Digest of everything a target receives in a chunk list, in order.
+
+    Covers each chunk's id, content hash, token count and metadata (as
+    canonical JSON, which validate_chunks guarantees it has): a retry that
+    changes only metadata or a token count is a different payload.
+    """
+    body = [
+        {
+            "chunk_id": c.chunk_id,
+            "content_hash": c.content_hash,
+            "token_count": c.token_count,
+            "metadata": c.metadata,
+        }
+        for c in chunks
+    ]
+    digest = hashlib.sha256(canonical_json({"chunks": body})).hexdigest()
+    return _DIGEST_PREFIX + digest
+
+
+def _legacy_chunks_digest(chunks: list[Any]) -> str:
     body = [[c.chunk_id, c.content_hash] for c in chunks]
     return hashlib.sha256(canonical_json({"chunks": body})).hexdigest()
+
+
+def payload_matches(bound_digest: str, chunks: list[Any]) -> bool:
+    """True if chunks are the payload a delivery's first intent recorded.
+
+    A delivery bound before schema 6 can only be checked as far as its
+    digest reaches (chunk ids and content hashes).
+    """
+    if bound_digest.startswith(_DIGEST_PREFIX):
+        return bound_digest == chunks_digest(chunks)
+    return bound_digest == _legacy_chunks_digest(chunks)
 
 
 def encode_target(target: Any) -> tuple[str, str]:
@@ -212,18 +256,73 @@ class DeliveryLog:
         """Durably append one event (committed, with its chain event, before this returns)."""
         try:
             with write_transaction(self._conn):
-                self._conn.execute(
-                    "INSERT INTO delivery_events "
-                    "(dispatch_id, event, planned, chunks_digest, done, error, at) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (dispatch_id, event, planned, chunks_digest, done, error, _now()),
-                )
-                append_event(self._conn, "delivery.event", dispatch_id, {
-                    "event": event, "planned": planned, "chunks_digest": chunks_digest,
-                    "done": done, "error": error,
-                })
+                self._insert(dispatch_id, event, planned, chunks_digest, done, error)
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"cannot record {event!r} for {dispatch_id}: {exc}") from exc
+
+    def _insert(
+        self, dispatch_id: str, event: str, planned: int | None, chunks_digest: str | None,
+        done: int | None, error: str | None,
+    ) -> None:
+        """Insert one delivery event and its chain event (inside a write transaction)."""
+        self._conn.execute(
+            "INSERT INTO delivery_events "
+            "(dispatch_id, event, planned, chunks_digest, done, error, at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (dispatch_id, event, planned, chunks_digest, done, error, _now()),
+        )
+        append_event(self._conn, "delivery.event", dispatch_id, {
+            "event": event, "planned": planned, "chunks_digest": chunks_digest,
+            "done": done, "error": error,
+        })
+
+    def append_intent(self, dispatch_id: str, chunks: list[Any]) -> str:
+        """Durably record the intent to write chunks; return the bound digest.
+
+        In one write transaction: if the delivery already has an intent, the
+        chunks must be that intent's payload (else PayloadConflictError and
+        nothing is recorded); otherwise this intent binds the delivery to
+        them. Two dispatchers racing on one delivery therefore cannot both
+        reach their writers with different payloads under its dispatch_id.
+        """
+        with write_transaction(self._conn):
+            first = self._conn.execute(
+                "SELECT planned, chunks_digest FROM delivery_events "
+                "WHERE dispatch_id=? AND event='intent' ORDER BY event_id LIMIT 1",
+                (dispatch_id,),
+            ).fetchone()
+            if first is None:
+                digest = chunks_digest(chunks)
+            elif first["planned"] == len(chunks) and payload_matches(first["chunks_digest"], chunks):
+                digest = first["chunks_digest"]
+            else:
+                raise PayloadConflictError(
+                    f"delivery {dispatch_id} is bound to a different payload than the "
+                    "chunks presented now; adapters must be deterministic"
+                )
+            try:
+                self._insert(dispatch_id, "intent", len(chunks), digest, None, None)
+            except sqlite3.IntegrityError as exc:  # the payload-binding trigger
+                raise PayloadConflictError(f"delivery {dispatch_id}: {exc}") from exc
+        return digest
+
+    def append_unwritten_failure(self, dispatch_id: str, error: str) -> None:
+        """Record a failure that happened before this attempt's writer was called.
+
+        This attempt wrote nothing, but another dispatch of the same delivery
+        may have an intent outstanding; reporting done=0 after it would claim
+        that write left nothing behind. So done is 0 only when no intent is
+        outstanding, and unknown (NULL) otherwise.
+        """
+        with write_transaction(self._conn):
+            last = self._conn.execute(
+                "SELECT event FROM delivery_events WHERE dispatch_id=? "
+                "AND event IN ('intent', 'receipt', 'failure') "
+                "ORDER BY event_id DESC LIMIT 1",
+                (dispatch_id,),
+            ).fetchone()
+            done = None if last is not None and last["event"] == "intent" else 0
+            self._insert(dispatch_id, "failure", None, None, done, error)
 
     def get(self, dispatch_id: str) -> Delivery:
         row = self._conn.execute(

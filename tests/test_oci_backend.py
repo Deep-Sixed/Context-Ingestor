@@ -27,6 +27,7 @@ from stele.containment import backend as backend_module
 from stele.containment import oci as oci_module
 from stele.containment.backend import (
     Capability,
+    ContainmentCleanupError,
     ParserRequirements,
     SandboxUnavailableError,
     select_backend,
@@ -425,6 +426,10 @@ class TestExecution:
             calls.append(argv)
             if argv[1] == "run":
                 raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=b"partial")
+            if argv[1:3] == ["container", "inspect"]:
+                return subprocess.CompletedProcess(
+                    argv, 1, "", f"Error: No such container: {argv[-1]}\n"
+                )
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -434,6 +439,70 @@ class TestExecution:
         name = _pairs(calls[0], "--name")[0]
         assert name.startswith("stele-")
         assert calls[1] == ["/usr/bin/docker", "rm", "-f", name]
+        # Reported as stopped only after the engine confirms the exact name is gone.
+        assert calls[2] == [
+            "/usr/bin/docker", "container", "inspect", "--format", "{{.Id}}", name
+        ]
+        assert len(calls) == 3
+
+    @pytest.mark.parametrize(
+        "rm, inspect",
+        [
+            # rm fails and the container is still there.
+            (lambda a: subprocess.CompletedProcess(a, 1, "", "Error: cannot kill\n"),
+             lambda a: subprocess.CompletedProcess(a, 0, "abc123\n", "")),
+            # rm hangs, and the engine cannot say whether the container exists.
+            (lambda a: (_ for _ in ()).throw(subprocess.TimeoutExpired(a, 30)),
+             lambda a: subprocess.CompletedProcess(a, 1, "", "Cannot connect to the daemon\n")),
+            # rm reports success, but the container is still listed.
+            (lambda a: subprocess.CompletedProcess(a, 0, "", ""),
+             lambda a: subprocess.CompletedProcess(a, 0, "abc123\n", "")),
+            # The engine binary disappeared.
+            (lambda a: (_ for _ in ()).throw(OSError("no engine")),
+             lambda a: (_ for _ in ()).throw(OSError("no engine"))),
+        ],
+        ids=["rm-fails", "rm-hangs-inspect-unknown", "rm-lies", "engine-gone"],
+    )
+    def test_timeout_without_proven_removal_is_a_containment_failure(
+        self, tmp_path: Path, monkeypatch, rm, inspect
+    ) -> None:
+        _fake_engine(monkeypatch)
+        monkeypatch.setattr(oci_module, "_host_ids", lambda: (1000, 1000))
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            if argv[1] == "run":
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            if argv[1] == "rm":
+                return rm(argv)
+            return inspect(argv)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        config = _config(tmp_path, timeout_seconds=5)
+        with pytest.raises(ContainmentCleanupError, match="could not be proven removed") as info:
+            OciBackend().execute(config)
+        assert info.value.artifact_dir == config.artifact_dir
+        # Removal was retried before giving up.
+        assert sum(1 for c in calls if c[1] == "rm") == oci_module._REMOVE_ATTEMPTS
+
+    def test_removal_retried_until_proven(self, tmp_path: Path, monkeypatch) -> None:
+        _fake_engine(monkeypatch)
+        monkeypatch.setattr(oci_module, "_host_ids", lambda: (1000, 1000))
+        inspections = iter([
+            subprocess.CompletedProcess([], 0, "abc123\n", ""),
+            subprocess.CompletedProcess([], 1, "", "Error: no such container stele-x\n"),
+        ])
+
+        def fake_run(argv, **kwargs):
+            if argv[1] == "run":
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            if argv[1] == "rm":
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return next(inspections)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert OciBackend().execute(_config(tmp_path, timeout_seconds=5)).timed_out
 
     def test_outcome_records_image_digest(self, tmp_path: Path, monkeypatch) -> None:
         _fake_engine(monkeypatch)

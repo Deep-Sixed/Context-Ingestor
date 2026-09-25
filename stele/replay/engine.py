@@ -6,7 +6,7 @@ recorded config, on its recorded input Snapshot, and compares the new output
 with the sealed one. It is a different operation from validation
 (stele.replay.planner), which only re-hashes files that already exist.
 
-Every replay has exactly one of four outcomes, never merged into each other:
+Every replay has exactly one of five outcomes, never merged into each other:
 
   REPRODUCED    byte-identical output from a deterministic replay. Only
                 parsers whose spec requires a DETERMINISTIC backend (Wasm, #7)
@@ -21,6 +21,10 @@ Every replay has exactly one of four outcomes, never merged into each other:
                 spec, a missing or different Wasm module or image, a missing
                 input Snapshot, no capable backend, or a non-deterministic
                 parser without a comparison policy.
+  FAILED        the parser was run as recorded but the run did not complete
+                (non-zero exit, timeout, resource limit, crash), so there is
+                no output to compare. Says nothing about the sealed evidence
+                and never feeds invalidation; replay again.
 
 Each replay is written to the ledger's append-only replay log. The replay's
 own output is stored in the evidence archive (replay_artifact_hash), so a
@@ -56,6 +60,7 @@ class ReplayOutcome(str, Enum):
     EQUIVALENT = "equivalent"
     DIVERGED = "diverged"
     UNREPLAYABLE = "unreplayable"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -178,7 +183,11 @@ def replay_records(
 
 def invalidate_diverged(dispatcher: Any, results: Iterable[ReplayResult]) -> list[Any]:
     """Invalidate every DIVERGED record through the Dispatcher, which also
-    removes what it delivered (#13). Returns the removal results."""
+    removes what it delivered (#13). Returns the removal results.
+
+    Only DIVERGED is a completed comparison that found a difference; FAILED
+    and UNREPLAYABLE replays compared nothing and never invalidate.
+    """
     removals: list[Any] = []
     for result in results:
         if result.outcome is ReplayOutcome.DIVERGED:
@@ -295,10 +304,12 @@ class _Replay:
             raise _Unreplayable("the materialized input does not hash to the recorded Snapshot")
 
         if not run.succeeded:
+            # No complete output was produced, so nothing was compared: a
+            # crash, timeout or resource limit is not evidence of divergence.
             return self._result(
-                ReplayOutcome.DIVERGED,
-                f"the replay run failed (exit code {run.exit_code}, timed out: {run.timed_out})",
-                ("<replay run failed>",),
+                ReplayOutcome.FAILED,
+                f"the replay run failed (exit code {run.exit_code}, timed out: "
+                f"{run.timed_out}); no output was compared",
             )
 
         recorded, replayed = record.artifact_manifest, run.artifact_digests

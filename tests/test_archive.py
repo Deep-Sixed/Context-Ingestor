@@ -473,6 +473,28 @@ class TestTreesAndRecords:
         with pytest.raises(IntegrityError, match="size"):
             store.put_snapshot(Snapshot(SnapshotKind.FILE, digest, 999, 1))
 
+    def test_same_size_corrupt_file_blob_is_not_certified(self, store: BlobStore) -> None:
+        digest = store.put_bytes(b"AAAA")
+        overwrite(store.root / "blobs" / digest[:2] / digest[2:], b"BBBB")
+        with pytest.raises(IntegrityError, match="corrupt"):
+            store.put_snapshot(Snapshot(SnapshotKind.FILE, digest, 4, 1))
+        assert not store.has_snapshot(digest, SnapshotKind.FILE)
+
+    def test_same_size_corrupt_tree_member_is_not_certified(self, store: BlobStore) -> None:
+        a, b = store.put_bytes(b"AAAA"), store.put_bytes(b"bb")
+        tree = store.put_tree({"a.txt": a, "sub/b.txt": b})
+        overwrite(store.root / "blobs" / a[:2] / a[2:], b"ZZZZ")
+        with pytest.raises(IntegrityError, match="corrupt"):
+            store.put_snapshot(Snapshot(SnapshotKind.TREE, tree, 6, 2))
+        assert not store.has_snapshot(tree, SnapshotKind.TREE)
+
+    def test_intact_tree_snapshot_is_recorded(self, store: BlobStore) -> None:
+        a, b = store.put_bytes(b"AAAA"), store.put_bytes(b"bb")
+        tree = store.put_tree({"a.txt": a, "sub/b.txt": b})
+        snapshot = Snapshot(SnapshotKind.TREE, tree, 6, 2)
+        assert store.put_snapshot(snapshot) == snapshot
+        assert store.get_snapshot(tree, SnapshotKind.TREE) == snapshot
+
     def test_tampered_snapshot_record_is_detected(self, store: BlobStore) -> None:
         digest = store.put_bytes(b"content")
         store.put_snapshot(Snapshot(SnapshotKind.FILE, digest, 7, 1))

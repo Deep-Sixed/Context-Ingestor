@@ -28,9 +28,10 @@ from .models import ArtifactRecord, ArtifactState, ParserIdentity, RunConditions
 
 # PRAGMA user_version of the current schema. 0 is a pre-#12 ledger (or an
 # empty database), 2 has records only, 3 adds the delivery log (#13), 4 the
-# replay log (#14), 5 the run conditions column (#30), 6 the hash-chained
-# event log; see stele/ledger/migration.py.
-SCHEMA_VERSION = 6
+# replay log (#14), 5 the run conditions column (#30), 6 binds each delivery
+# to one payload and adds the FAILED replay outcome, 7 the hash-chained event
+# log; see stele/ledger/migration.py.
+SCHEMA_VERSION = 7
 
 _DDL = (
     """
@@ -96,7 +97,7 @@ DELIVERY_DDL = (
                          'intent', 'receipt', 'failure',
                          'removal_intent', 'removal_receipt', 'removal_failure')),
         planned      INTEGER,   -- intent: chunks about to be written
-        chunks_digest TEXT,     -- intent: digest of the chunk ids and content hashes
+        chunks_digest TEXT,     -- intent: digest of the payload (see delivery.chunks_digest)
         done         INTEGER,   -- outcome: chunks written or removed; NULL = unknown
         error        TEXT,
         at           TEXT NOT NULL
@@ -242,6 +243,57 @@ REPLAY_DDL = (
 )
 
 
+# Version 5 → 6.
+#
+# A delivery is bound to the payload of its first intent: every later intent
+# of the same delivery (a retry, or a concurrent dispatch that lost the race)
+# must carry the same chunks_digest and planned count, so one dispatch_id can
+# never name two payloads. DeliveryLog.append_intent checks this in a write
+# transaction; the trigger makes the database refuse it whatever the writer.
+#
+# The replay log gains the FAILED outcome (the replay run was attempted but
+# produced no output to compare). SQLite cannot alter a CHECK constraint, so
+# the table is rebuilt; its rows are copied unchanged.
+V6_DDL = (
+    """
+    CREATE TRIGGER delivery_events_one_payload BEFORE INSERT ON delivery_events
+    WHEN NEW.event = 'intent' AND (
+        NEW.chunks_digest IS NULL OR NEW.planned IS NULL OR EXISTS (
+            SELECT 1 FROM delivery_events
+            WHERE dispatch_id = NEW.dispatch_id AND event = 'intent'
+              AND (chunks_digest IS NOT NEW.chunks_digest OR planned IS NOT NEW.planned)))
+    BEGIN SELECT RAISE(ABORT, 'a delivery is bound to the payload of its first intent'); END
+    """,
+    """
+    CREATE TABLE replays_v6 (
+        replay_id            TEXT PRIMARY KEY,
+        record_id            TEXT NOT NULL REFERENCES artifact_records(record_id),
+        outcome              TEXT NOT NULL CHECK (outcome IN (
+                                 'reproduced', 'equivalent', 'diverged', 'unreplayable',
+                                 'failed')),
+        reason               TEXT NOT NULL,
+        replay_run_id        TEXT,
+        replay_artifact_hash TEXT,
+        differences          TEXT NOT NULL,
+        policy               TEXT,
+        backend              TEXT,
+        platform             TEXT NOT NULL,
+        replayed_at          TEXT NOT NULL
+    )
+    """,
+    """
+    INSERT INTO replays_v6 (replay_id, record_id, outcome, reason, replay_run_id,
+        replay_artifact_hash, differences, policy, backend, platform, replayed_at)
+    SELECT replay_id, record_id, outcome, reason, replay_run_id,
+        replay_artifact_hash, differences, policy, backend, platform, replayed_at
+    FROM replays
+    """,
+    "DROP TABLE replays",  # drops its indexes and append-only triggers too
+    "ALTER TABLE replays_v6 RENAME TO replays",
+    *REPLAY_DDL[1:],       # the indexes and append-only triggers, recreated
+)
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     """A connection to a ledger database.
 
@@ -258,7 +310,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create the current schema. The caller holds the write transaction."""
-    for statement in (*_DDL, *DELIVERY_DDL, *REPLAY_DDL, *EVENTS_DDL):
+    for statement in (*_DDL, *DELIVERY_DDL, *REPLAY_DDL, *V6_DDL, *EVENTS_DDL):
         conn.execute(statement)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 

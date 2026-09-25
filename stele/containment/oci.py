@@ -32,6 +32,7 @@ from uuid import uuid4
 
 from .backend import (
     Capability,
+    ContainmentCleanupError,
     ExecutionOutcome,
     SandboxBackend,
     SandboxUnavailableError,
@@ -430,6 +431,9 @@ class OciBackend(SandboxBackend):
         try:
             argv = self.build_argv(config, container_name=container_name, user=user)
             outcome = self._run(argv, probe.engine, container_name, config.timeout_seconds)
+        except ContainmentCleanupError as exc:
+            exc.artifact_dir = config.artifact_dir
+            raise
         finally:
             if handoff is not None:
                 handoff.take_back()
@@ -461,8 +465,17 @@ class OciBackend(SandboxBackend):
                 raise
             raise SandboxUnavailableError(self.unavailable_reason()) from exc
         except subprocess.TimeoutExpired as exc:
-            # Killing the CLI client does not stop the container; remove it.
-            _force_remove(engine, container_name)
+            # Killing the CLI client does not stop the container; remove it,
+            # and report the run as stopped only once the engine confirms the
+            # container no longer exists.
+            problem = _force_remove(engine, container_name)
+            if problem is not None:
+                raise ContainmentCleanupError(
+                    f"the parser timed out after {timeout}s, but container "
+                    f"{container_name} could not be proven removed ({problem}); it may "
+                    "still be running and writing to the output directory, which must "
+                    "not be used"
+                ) from exc
             return self._outcome(
                 -1, _decode(exc.stdout), _decode(exc.stderr), time.monotonic() - t0,
                 engine, timeout, timed_out=True,
@@ -637,13 +650,57 @@ def _run_json(argv: list[str]) -> object:
         return f"unparseable output: {exc}"
 
 
-def _force_remove(engine: str, container_name: str) -> None:
+_REMOVE_ATTEMPTS = 3
+
+
+def _force_remove(engine: str, container_name: str) -> str | None:
+    """Force-remove a container; None once the engine confirms it is gone.
+
+    Otherwise returns why its absence could not be proven: the removal
+    failed and the container still exists, or the engine could not say.
+    """
+    problem = "not attempted"
+    for _ in range(_REMOVE_ATTEMPTS):
+        try:
+            rm = subprocess.run(
+                [engine, "rm", "-f", container_name],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=_PROBE_TIMEOUT,
+            )
+            problem = (
+                f"{engine} rm exited {rm.returncode}: {_last_line(rm.stderr)}"
+                if rm.returncode != 0 else "removal reported success"
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            problem = f"{engine} rm failed: {exc}"
+        absent, why = _container_absent(engine, container_name)
+        if absent:
+            return None
+        problem = f"{problem}; {why}"
+    return problem
+
+
+def _container_absent(engine: str, container_name: str) -> tuple[bool, str]:
+    """(True, "") only when the engine reports no container by that exact name."""
     try:
-        subprocess.run(
-            [engine, "rm", "-f", container_name],
+        proc = subprocess.run(
+            [engine, "container", "inspect", "--format", "{{.Id}}", container_name],
             stdin=subprocess.DEVNULL,
             capture_output=True,
+            text=True,
             timeout=_PROBE_TIMEOUT,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"{engine} container inspect failed: {exc}"
+    if proc.returncode == 0:
+        return False, "the container still exists"
+    if "no such" in (proc.stderr or "").lower():
+        return True, ""
+    return False, f"{engine} container inspect exited {proc.returncode}: {_last_line(proc.stderr)}"
+
+
+def _last_line(text: str | None) -> str:
+    lines = (text or "").strip().splitlines()
+    return lines[-1] if lines else "no output"

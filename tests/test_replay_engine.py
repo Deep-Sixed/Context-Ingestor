@@ -232,13 +232,34 @@ class TestInjectedNondeterminism:
         assert invalidate_diverged(Dispatcher(ledger), [result]) == []
         assert ledger.get(record.record_id).state is ArtifactState.SEALED
 
-    def test_failed_replay_run_is_diverged(self, ledger, tmp_path) -> None:
+    def test_failed_replay_run_is_failed_not_diverged(self, ledger, tmp_path) -> None:
         record = _record(ledger, _probe_spec(), _probe_input(tmp_path), tmp_path)
         # Same module, but a CPU budget too small to finish: the run traps.
+        # That says nothing about the sealed output, so it is not DIVERGED.
         tiny = _probe_spec(backend=lambda identity: WasmtimeBackend(fuel=10))
         result = replay_record(ledger, ParserCatalog([tiny]), record)
-        assert result.outcome is ReplayOutcome.DIVERGED
-        assert "failed" in result.reason
+        assert result.outcome is ReplayOutcome.FAILED
+        assert "failed" in result.reason and result.differences == ()
+        assert ReplayLog(ledger).with_outcome(ReplayOutcome.FAILED) == [result]
+
+    def test_failed_replay_does_not_invalidate(self, ledger, tmp_path) -> None:
+        record = _record(ledger, _probe_spec(), _probe_input(tmp_path), tmp_path)
+        from tests.test_durable_dispatch import MemoryTarget
+
+        class Adapter:
+            def transform(self, bundle):
+                return [make_chunk(p, bundle.read(p).hex()) for p in bundle.paths()]
+
+        target = MemoryTarget()
+        dispatcher = Dispatcher(ledger)
+        dispatcher.register_target(LightRAGTarget, target)
+        assert dispatcher.dispatch(Adapter(), record, LightRAGTarget("ws")).status == "success"
+
+        tiny = _probe_spec(backend=lambda identity: WasmtimeBackend(fuel=10))
+        result = replay_record(ledger, ParserCatalog([tiny]), record)
+        assert invalidate_diverged(dispatcher, [result]) == []
+        assert ledger.get(record.record_id).state is ArtifactState.SEALED
+        assert target.rows
 
 
 # ---------------------------------------------------------------------------
@@ -577,8 +598,9 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     conn = sqlite3.connect(db)
     for name in ("events_append_only_u", "events_append_only_d"):
         conn.execute(f"DROP TRIGGER {name}")
-    conn.execute("DROP TABLE events")  # a v4 ledger has no event log (v6) either
+    conn.execute("DROP TABLE events")  # a v4 ledger has no event log (v7) either
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")
+    conn.execute("DROP TRIGGER delivery_events_one_payload")  # added in v6
     conn.execute("PRAGMA user_version = 4")
     conn.commit()
     conn.close()
@@ -590,7 +612,7 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     assert ledger.find_by_parser(record.parser.name, device="cpu") == []
     assert verify_ledger(ledger).ok  # the migrated record was imported into the chain
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
     # The chain commits to run conditions: changing them by hand is detected.
     conn.execute(
         "UPDATE artifact_records SET run_conditions=? WHERE record_id=?",
@@ -618,6 +640,7 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     conn.execute("DROP TABLE replays")
     conn.execute("DROP TABLE events")
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")  # added in v5
+    conn.execute("DROP TRIGGER delivery_events_one_payload")  # added by version 6
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -625,5 +648,5 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     ledger = open_ledger(db)
     assert ReplayLog(ledger).all() == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
     conn.close()

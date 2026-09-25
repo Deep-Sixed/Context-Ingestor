@@ -21,11 +21,12 @@ Rules:
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
-from ..archive.records import SnapshotKind
+from ..archive.records import SnapshotKind, canonical_json
 from ..archive.store import BlobStore
 from ..ledger.models import ArtifactRecord, ParserIdentity
 
@@ -45,6 +46,8 @@ class SteleChunk:
     content: str
     content_hash: str       # sha256(content.encode()) — verified by Dispatcher
     token_count: int        # must be >= 0
+    # A JSON object with one canonical encoding (validated by the Dispatcher);
+    # part of the delivery's fingerprint, like the content.
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -171,10 +174,51 @@ def validate_chunks(chunks: list[SteleChunk]) -> None:
                 f"expected {expected[:12]}…, got {chunk.content_hash[:12]}…"
             )
 
+        if not isinstance(chunk.token_count, int) or isinstance(chunk.token_count, bool):
+            raise ChunkValidationError(
+                f"chunk[{i}] ({chunk.chunk_id!r}): token_count must be an int"
+            )
         if chunk.token_count < 0:
             raise ChunkValidationError(
                 f"chunk[{i}] ({chunk.chunk_id!r}): token_count must be >= 0"
             )
+
+        _check_metadata(i, chunk)
+
+
+def _check_metadata(i: int, chunk: SteleChunk) -> None:
+    """Metadata must be a JSON object with exactly one canonical encoding.
+
+    The delivery log fingerprints it (stele.ledger.delivery.chunks_digest),
+    so it must survive a JSON round trip unchanged: no tuples, non-string
+    keys, NaN or infinities, or objects JSON cannot represent.
+    """
+    where = f"chunk[{i}] ({chunk.chunk_id!r}): metadata"
+    if not isinstance(chunk.metadata, dict):
+        raise ChunkValidationError(f"{where} must be a dict, got {type(chunk.metadata).__name__}")
+    try:
+        encoded = canonical_json(chunk.metadata)
+    except (TypeError, ValueError) as exc:
+        raise ChunkValidationError(f"{where} is not JSON-serializable: {exc}") from None
+    if not _json_equal(json.loads(encoded), chunk.metadata):
+        raise ChunkValidationError(f"{where} does not survive a JSON round trip unchanged")
+
+
+def _json_equal(decoded: Any, original: Any) -> bool:
+    """Equality that also tells 1, 1.0 and True apart, as JSON does."""
+    if isinstance(original, dict):
+        return (
+            isinstance(decoded, dict)
+            and decoded.keys() == original.keys()
+            and all(_json_equal(decoded[k], original[k]) for k in original)
+        )
+    if isinstance(original, list):
+        return (
+            isinstance(decoded, list)
+            and len(decoded) == len(original)
+            and all(_json_equal(d, o) for d, o in zip(decoded, original))
+        )
+    return type(decoded) is type(original) and decoded == original
 
 
 # ---------------------------------------------------------------------------
