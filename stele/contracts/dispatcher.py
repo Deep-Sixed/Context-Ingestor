@@ -196,11 +196,13 @@ class Dispatcher:
         except Exception as exc:
             done = exc.chunks_written if isinstance(exc, PartialWriteError) else None
             self._log.append(dispatch_id, "failure", done=done, error=repr(exc))
-            return self._result(self._log.get(dispatch_id), target)
-        self._log.append(dispatch_id, "receipt", done=len(chunks))
+        else:
+            self._log.append(dispatch_id, "receipt", done=len(chunks))
 
         # An invalidation that raced this write may have run its removals
         # before the data landed; remove it now rather than leave it live.
+        # A failed write may still have landed some chunks, so this applies
+        # to failures too (retract skips a failure that wrote nothing).
         if self._ledger.get(record_id).state is ArtifactState.INVALIDATED:
             self.retract(record_id)
         return self._result(self._log.get(dispatch_id), target)
@@ -220,9 +222,12 @@ class Dispatcher:
     def retract(self, record_id: str) -> list[RemovalResult]:
         """Remove the target data of every delivery an invalidated record made.
 
-        Deliveries the log proves wrote nothing, and deliveries already
-        removed, are skipped. Each removal is logged as intent, then receipt
-        or failure; failed removals are retried by the next call.
+        Deliveries the log proves hold nothing at the target are skipped:
+        those that wrote nothing, and those removed after their last write
+        concluded. A delivery whose write was still in flight when it was
+        removed may have landed since, so it is removed again (removal is
+        idempotent). Each removal is logged as intent, then receipt or
+        failure; failed removals are retried by the next call.
         """
         state = self._ledger.get(record_id).state
         if state is not ArtifactState.INVALIDATED:
@@ -230,7 +235,7 @@ class Dispatcher:
 
         results: list[RemovalResult] = []
         for delivery in self._log.for_record(record_id):
-            if delivery.status is DeliveryStatus.REMOVED or not delivery.possibly_written:
+            if not delivery.possibly_written:
                 continue
             results.append(self._remove(delivery))
         return results
