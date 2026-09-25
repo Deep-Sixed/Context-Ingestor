@@ -18,6 +18,29 @@ Use Linux namespaces via `bubblewrap` (bwrap) to wrap parser invocations.
 Alternatively, a Docker-based sandbox with no volume mounts to production
 paths and no network access.
 
+### Sandbox backends (roadmap #5)
+
+Parser execution goes through `stele.containment.backend.SandboxBackend`.
+Each backend declares the `Capability` values it enforces or supports; each
+parser declares `ParserRequirements` (`requires_gpu`, `requires_native_libs`,
+`deterministic`). `run_in_sandbox()` picks the first available backend that
+covers every requirement — always including filesystem and network isolation —
+and otherwise raises `UnsupportedBackendError` (or `SandboxUnavailableError`
+when a capable backend exists but cannot run on this host) before anything is
+staged or executed. There is no unsandboxed fallback, and parsers cannot
+request network access.
+
+| Backend | Enforces / supports |
+|---------|---------------------|
+| `bubblewrap` | filesystem isolation, network isolation, native libraries |
+
+Every run result records the backend that executed it (`SandboxResult.backend`)
+and the SHA-256 of the exact staged input bytes (`SandboxResult.input_sha256`;
+a manifest digest for directory inputs). Inputs may be a single regular file or
+a directory tree of regular files, staged by descriptor without following
+symlinks. The containment proofs in `tests/test_phase_e_containment.py` run once
+per registered backend.
+
 ### What is enforced today vs. still a goal
 
 | Goal | Status |
