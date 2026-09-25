@@ -3,7 +3,7 @@ Phase G replay proof tests.
 
 Seven required proofs:
 
-  PASS 1 — Committed artifact can be selected for replay
+  PASS 1 — Sealed artifact can be selected for replay
   PASS 2 — Artifact re-hash matches ledger hash (ok)
   PASS 3 — Changed artifact is detected as drift
   PASS 4 — Missing artifact is detected as unreplayable
@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from stele.archive import Snapshot, SnapshotKind
 from stele.ledger.models import ArtifactState
 from stele.ledger.store import LedgerStore
 from stele.replay.invalidation import (
@@ -34,6 +35,7 @@ from stele.replay.models import ValidationResult
 from stele.replay.planner import plan_replay
 from stele.replay.validator import validate_artifact
 from stele.replay.views import LedgerViews
+from tests.ledger_helpers import PROVENANCE, open_ledger
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +44,7 @@ from stele.replay.views import LedgerViews
 
 @pytest.fixture
 def store(tmp_path: Path) -> LedgerStore:
-    return LedgerStore(tmp_path / "ledger.db")
+    return open_ledger(tmp_path / "ledger.db")
 
 
 @pytest.fixture
@@ -58,20 +60,21 @@ def _write(artifact_dir: Path, name: str, content: str) -> Path:
     return p
 
 
-def _commit_record(store: LedgerStore, artifact_dir: Path, content: str = "{}") -> str:
-    """Helper: write an artifact, create pending, commit, return record_id."""
+def _sealed_record(store: LedgerStore, artifact_dir: Path, content: str = "{}") -> str:
+    """Helper: write an artifact, create pending, seal, return record_id."""
     p = _write(artifact_dir, f"out_{uuid.uuid4().hex[:8]}.json", content)
     record = store.create_pending(
+        **PROVENANCE,
         run_id=str(uuid.uuid4()),
         artifact_dir=artifact_dir,
         artifact_paths=[p],
     )
-    store.commit(record.record_id)
+    store.seal(record.record_id)
     return record.record_id
 
 
 # ---------------------------------------------------------------------------
-# PASS 1 — Committed artifact can be selected for replay
+# PASS 1 — Sealed artifact can be selected for replay
 # ---------------------------------------------------------------------------
 
 class TestReplaySelection:
@@ -79,15 +82,15 @@ class TestReplaySelection:
     def test_committed_record_appears_in_plan(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record_id = _commit_record(store, artifact_dir)
+        record_id = _sealed_record(store, artifact_dir)
         plan = plan_replay(store)
         assert any(c.record.record_id == record_id for c in plan.candidates)
 
     def test_plan_summary_counts_are_correct(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        _commit_record(store, artifact_dir, '{"v": 1}')
-        _commit_record(store, artifact_dir, '{"v": 2}')
+        _sealed_record(store, artifact_dir, '{"v": 1}')
+        _sealed_record(store, artifact_dir, '{"v": 2}')
         plan = plan_replay(store)
         assert plan.replayable_count == 2
         assert plan.drifted_count == 0
@@ -96,15 +99,17 @@ class TestReplaySelection:
     def test_filter_by_run_id(self, store: LedgerStore, artifact_dir: Path) -> None:
         p1 = _write(artifact_dir, "r1.json", "run1")
         rec1 = store.create_pending(
+            **PROVENANCE,
             run_id="run-aaa", artifact_dir=artifact_dir, artifact_paths=[p1]
         )
-        store.commit(rec1.record_id)
+        store.seal(rec1.record_id)
 
         p2 = _write(artifact_dir, "r2.json", "run2")
         rec2 = store.create_pending(
+            **PROVENANCE,
             run_id="run-bbb", artifact_dir=artifact_dir, artifact_paths=[p2]
         )
-        store.commit(rec2.record_id)
+        store.seal(rec2.record_id)
 
         plan = plan_replay(store, run_id="run-aaa")
         assert len(plan.candidates) == 1
@@ -122,12 +127,13 @@ class TestHashMatchOk:
     ) -> None:
         p = _write(artifact_dir, "result.json", '{"stable": true}')
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
-        committed = store.get(record.record_id)
+        store.seal(record.record_id)
+        sealed = store.get(record.record_id)
 
-        result = validate_artifact(committed)
+        result = validate_artifact(sealed)
         assert result.status == "ok"
         assert result.is_replayable
         assert not result.drifted_files
@@ -136,7 +142,7 @@ class TestHashMatchOk:
     def test_ok_artifact_appears_in_replayable(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        _commit_record(store, artifact_dir)
+        _sealed_record(store, artifact_dir)
         plan = plan_replay(store)
         assert plan.replayable_count == 1
         assert plan.drifted_count == 0
@@ -153,15 +159,16 @@ class TestDriftDetection:
     ) -> None:
         p = _write(artifact_dir, "result.json", "original content")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
-        committed = store.get(record.record_id)
+        store.seal(record.record_id)
+        sealed = store.get(record.record_id)
 
-        # Mutate the file after committing
+        # Mutate the file after sealing
         p.write_text("tampered content")
 
-        result = validate_artifact(committed)
+        result = validate_artifact(sealed)
         assert result.status == "drift"
         assert not result.is_replayable
         assert "result.json" in result.drifted_files
@@ -171,17 +178,18 @@ class TestDriftDetection:
     ) -> None:
         p = _write(artifact_dir, "result.json", "original")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
-        committed = store.get(record.record_id)
+        store.seal(record.record_id)
+        sealed = store.get(record.record_id)
 
         outside = tmp_path / "outside.txt"
         outside.write_text("host content")
         p.unlink()
         p.symlink_to(outside)
 
-        result = validate_artifact(committed)
+        result = validate_artifact(sealed)
         assert result.status == "drift"
         assert "result.json" in result.drifted_files
 
@@ -192,10 +200,11 @@ class TestDriftDetection:
         nested.mkdir()
         p = _write(nested, "result.json", "original")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
-        committed = store.get(record.record_id)
+        store.seal(record.record_id)
+        sealed = store.get(record.record_id)
 
         p.unlink()
         nested.rmdir()
@@ -204,7 +213,7 @@ class TestDriftDetection:
         (outside / "result.json").write_text("host content")
         nested.symlink_to(outside, target_is_directory=True)
 
-        result = validate_artifact(committed)
+        result = validate_artifact(sealed)
         assert result.status == "drift"
         assert "nested/result.json" in result.drifted_files
 
@@ -213,9 +222,10 @@ class TestDriftDetection:
     ) -> None:
         p = _write(artifact_dir, "out.json", "v1")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
+        store.seal(record.record_id)
 
         p.write_text("v2 — mutated")
         plan = plan_replay(store)
@@ -228,9 +238,10 @@ class TestDriftDetection:
     ) -> None:
         p = _write(artifact_dir, "chunk.json", "original")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
+        store.seal(record.record_id)
         p.write_text("changed")
 
         result = validate_artifact(store.get(record.record_id))
@@ -248,14 +259,15 @@ class TestMissingDetection:
     ) -> None:
         p = _write(artifact_dir, "result.json", "content")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
-        committed = store.get(record.record_id)
+        store.seal(record.record_id)
+        sealed = store.get(record.record_id)
 
-        p.unlink()  # delete after commit
+        p.unlink()  # delete after sealing
 
-        result = validate_artifact(committed)
+        result = validate_artifact(sealed)
         assert result.status == "missing"
         assert not result.is_replayable
         assert "result.json" in result.missing_files
@@ -267,9 +279,10 @@ class TestMissingDetection:
         p1 = _write(artifact_dir, "a.json", "aaa")
         p2 = _write(artifact_dir, "b.json", "bbb")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p1, p2]
         )
-        store.commit(record.record_id)
+        store.seal(record.record_id)
 
         p1.unlink()          # missing
         p2.write_text("BBB")  # drifted
@@ -281,9 +294,10 @@ class TestMissingDetection:
     def test_missing_appears_in_plan(self, store: LedgerStore, artifact_dir: Path) -> None:
         p = _write(artifact_dir, "r.json", "data")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(record.record_id)
+        store.seal(record.record_id)
         p.unlink()
 
         plan = plan_replay(store)
@@ -300,7 +314,7 @@ class TestInvalidatedExcludedByDefault:
     def test_invalidated_record_excluded_from_default_plan(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record_id = _commit_record(store, artifact_dir)
+        record_id = _sealed_record(store, artifact_dir)
         invalidate_record(store, record_id, InvalidationReason.MANUAL, note="test")
 
         plan = plan_replay(store)
@@ -310,7 +324,7 @@ class TestInvalidatedExcludedByDefault:
     def test_invalidated_state_persists_in_ledger(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record_id = _commit_record(store, artifact_dir)
+        record_id = _sealed_record(store, artifact_dir)
         invalidate_record(store, record_id, InvalidationReason.SOURCE_CHANGED)
 
         record = store.get(record_id)
@@ -320,34 +334,44 @@ class TestInvalidatedExcludedByDefault:
     def test_bulk_invalidate_by_source_hash(
         self, store: LedgerStore, artifact_dir: Path, tmp_path: Path
     ) -> None:
-        source_hash = "sha256:abc123"
-        # Create two committed records with the same source_hash
-        dirs = [tmp_path / f"art{i}" for i in range(2)]
-        for d in dirs:
+        def snapshot(data: bytes) -> Snapshot:
+            digest = store.archive.put_bytes(data)
+            return store.archive.put_snapshot(
+                Snapshot(SnapshotKind.FILE, digest, len(data), 1)
+            )
+
+        old, other = snapshot(b"source v1"), snapshot(b"another source")
+        # Two sealed runs over the same input Snapshot, one over another.
+        dirs = [tmp_path / f"art{i}" for i in range(3)]
+        records = []
+        for d, snap in zip(dirs, [old, old, other]):
             d.mkdir()
             p = _write(d, "r.json", f"content-{d.name}")
             rec = store.create_pending(
+                **PROVENANCE,
                 run_id=str(uuid.uuid4()),
                 artifact_dir=d,
                 artifact_paths=[p],
-                source_hash=source_hash,
+                input_snapshot=snap,
             )
-            store.commit(rec.record_id)
+            records.append(store.seal(rec.record_id))
 
         invalidated = invalidate_by_source_hash(
-            store, source_hash, InvalidationReason.SOURCE_CHANGED
+            store, old.digest, InvalidationReason.SOURCE_CHANGED
         )
-        assert len(invalidated) == 2
+        assert {r.record_id for r in invalidated} == {r.record_id for r in records[:2]}
         assert all(r.state is ArtifactState.INVALIDATED for r in invalidated)
+        assert store.get(records[2].record_id).state is ArtifactState.SEALED
 
     def test_auto_invalidate_drifted_from_plan(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         p = _write(artifact_dir, "r.json", "original")
         rec = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
-        store.commit(rec.record_id)
+        store.seal(rec.record_id)
         p.write_text("drifted")
 
         plan = plan_replay(store)
@@ -365,11 +389,12 @@ class TestInvalidatedExcludedByDefault:
 # PASS 6 — Failed/pending records excluded from replay
 # ---------------------------------------------------------------------------
 
-class TestNonCommittedExcluded:
+class TestNonSealedExcluded:
 
     def test_pending_record_excluded(self, store: LedgerStore, artifact_dir: Path) -> None:
         p = _write(artifact_dir, "r.json", "{}")
         store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
         plan = plan_replay(store)
@@ -378,6 +403,7 @@ class TestNonCommittedExcluded:
     def test_failed_record_excluded(self, store: LedgerStore, artifact_dir: Path) -> None:
         p = _write(artifact_dir, "r.json", "{}")
         record = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
         store.fail(record.record_id, "parse error")
@@ -388,24 +414,27 @@ class TestNonCommittedExcluded:
     def test_only_committed_records_in_replay(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        # One committed, one pending, one failed
+        # One sealed, one pending, one failed
         dirs = [artifact_dir / f"d{i}" for i in range(3)]
         for d in dirs:
             d.mkdir()
 
-        p0 = _write(dirs[0], "r.json", "committed")
+        p0 = _write(dirs[0], "r.json", "sealed")
         rec0 = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=dirs[0], artifact_paths=[p0]
         )
-        store.commit(rec0.record_id)
+        store.seal(rec0.record_id)
 
         p1 = _write(dirs[1], "r.json", "pending")
         store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=dirs[1], artifact_paths=[p1]
         )
 
         p2 = _write(dirs[2], "r.json", "failed")
         rec2 = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=dirs[2], artifact_paths=[p2]
         )
         store.fail(rec2.record_id, "error")
@@ -424,7 +453,7 @@ class TestIncludeInvalidatedMode:
     def test_include_invalidated_returns_invalidated_records(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record_id = _commit_record(store, artifact_dir)
+        record_id = _sealed_record(store, artifact_dir)
         invalidate_record(store, record_id, InvalidationReason.MANUAL)
 
         default_plan = plan_replay(store)
@@ -434,21 +463,21 @@ class TestIncludeInvalidatedMode:
         assert len(audit_plan.candidates) == 1
         assert audit_plan.candidates[0].record.record_id == record_id
 
-    def test_include_invalidated_mixed_with_committed(
+    def test_include_invalidated_mixed_with_sealed(
         self, store: LedgerStore, artifact_dir: Path, tmp_path: Path
     ) -> None:
         dir2 = tmp_path / "art2"
         dir2.mkdir()
 
-        r1_id = _commit_record(store, artifact_dir, '{"v":1}')
-        r2_id = _commit_record(store, dir2, '{"v":2}')
+        r1_id = _sealed_record(store, artifact_dir, '{"v":1}')
+        r2_id = _sealed_record(store, dir2, '{"v":2}')
 
         invalidate_record(store, r1_id, InvalidationReason.DATA_QUALITY)
 
         default_plan = plan_replay(store)
         audit_plan = plan_replay(store, include_invalidated=True)
 
-        # Default: only the non-invalidated committed record
+        # Default: only the non-invalidated sealed record
         assert len(default_plan.candidates) == 1
         assert default_plan.candidates[0].record.record_id == r2_id
 
@@ -461,11 +490,12 @@ class TestIncludeInvalidatedMode:
         dir2 = tmp_path / "art2"
         dir2.mkdir()
 
-        r1_id = _commit_record(store, artifact_dir)
+        r1_id = _sealed_record(store, artifact_dir)
         invalidate_record(store, r1_id, InvalidationReason.MANUAL)
 
         p2 = _write(dir2, "r.json", "{}")
         rec2 = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=dir2, artifact_paths=[p2]
         )
         store.fail(rec2.record_id, "crash")
@@ -487,33 +517,33 @@ class TestIncludeInvalidatedMode:
 
         # 1 pending
         p0 = _write(dirs[0], "r.json", "pending")
-        store.create_pending(run_id=str(uuid.uuid4()), artifact_dir=dirs[0], artifact_paths=[p0])
+        store.create_pending(**PROVENANCE, run_id=str(uuid.uuid4()), artifact_dir=dirs[0], artifact_paths=[p0])
 
-        # 1 committed
-        p1 = _write(dirs[1], "r.json", "committed")
-        rec1 = store.create_pending(run_id=str(uuid.uuid4()), artifact_dir=dirs[1], artifact_paths=[p1])
-        store.commit(rec1.record_id)
+        # 1 sealed
+        p1 = _write(dirs[1], "r.json", "sealed")
+        rec1 = store.create_pending(**PROVENANCE, run_id=str(uuid.uuid4()), artifact_dir=dirs[1], artifact_paths=[p1])
+        store.seal(rec1.record_id)
 
         # 1 failed
         p2 = _write(dirs[2], "r.json", "failed")
-        rec2 = store.create_pending(run_id=str(uuid.uuid4()), artifact_dir=dirs[2], artifact_paths=[p2])
+        rec2 = store.create_pending(**PROVENANCE, run_id=str(uuid.uuid4()), artifact_dir=dirs[2], artifact_paths=[p2])
         store.fail(rec2.record_id, "err")
 
         # 1 invalidated
         p3 = _write(dirs[3], "r.json", "invalidated")
-        rec3 = store.create_pending(run_id=str(uuid.uuid4()), artifact_dir=dirs[3], artifact_paths=[p3])
-        store.commit(rec3.record_id)
+        rec3 = store.create_pending(**PROVENANCE, run_id=str(uuid.uuid4()), artifact_dir=dirs[3], artifact_paths=[p3])
+        store.seal(rec3.record_id)
         store.invalidate(rec3.record_id, "manual test")
 
         views = LedgerViews(store)
         all_ids = {r.record_id for r in views.all()}
         pending_ids = {r.record_id for r in views.pending()}
-        committed_ids = {r.record_id for r in views.committed()}
+        sealed_ids = {r.record_id for r in views.sealed()}
         bad_ids = {r.record_id for r in views.invalidated_or_failed()}
 
         assert len(all_ids) == 4
         assert len(pending_ids) == 1
-        assert len(committed_ids) == 1
+        assert len(sealed_ids) == 1
         assert len(bad_ids) == 2
         # union of all partitions == all
-        assert pending_ids | committed_ids | bad_ids == all_ids
+        assert pending_ids | sealed_ids | bad_ids == all_ids

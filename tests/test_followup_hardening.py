@@ -27,12 +27,13 @@ from stele.containment.runner import run_in_sandbox
 from stele.containment.sandbox import BubblewrapSandbox, SandboxConfig
 from stele.ledger.hashing import UnsafeFileError, sha256_file_beneath
 from stele.ledger.models import ArtifactState
-from stele.ledger.store import ArtifactDriftError, LedgerStore
+from stele.ledger.store import ArtifactDriftError, DuplicateRunError, LedgerStore
 from stele.ledger.transaction import ledger_transaction
 from stele.replay.invalidation import auto_invalidate_drifted, invalidate_record
 from stele.replay.models import InvalidationReason
 from stele.replay.planner import plan_replay
 from stele.replay.validator import validate_artifact
+from tests.ledger_helpers import PROVENANCE, open_ledger
 
 PYTHON = str(Path(sys.executable).resolve())
 requires_bwrap = pytest.mark.skipif(
@@ -44,7 +45,7 @@ requires_fifo = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.m
 
 @pytest.fixture
 def store(tmp_path: Path) -> LedgerStore:
-    return LedgerStore(tmp_path / "ledger.db")
+    return open_ledger(tmp_path / "ledger.db")
 
 
 @pytest.fixture
@@ -74,13 +75,14 @@ def _within(seconds: float, fn):
     return outcome.get("value")
 
 
-def _commit(store: LedgerStore, artifact_dir: Path, name: str, content: str) -> str:
+def _seal(store: LedgerStore, artifact_dir: Path, name: str, content: str) -> str:
     p = artifact_dir / name
     p.write_text(content)
     rec = store.create_pending(
+        **PROVENANCE,
         run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
     )
-    store.commit(rec.record_id)
+    store.seal(rec.record_id)
     return rec.record_id
 
 
@@ -111,7 +113,7 @@ class TestFifoNeverBlocks:
     def test_validator_reports_drift_for_fifo_replacement(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        record_id = _commit(store, artifact_dir, "result.json", "original")
+        record_id = _seal(store, artifact_dir, "result.json", "original")
         (artifact_dir / "result.json").unlink()
         os.mkfifo(artifact_dir / "result.json")
 
@@ -119,19 +121,20 @@ class TestFifoNeverBlocks:
         assert result.status == "drift"
         assert "result.json" in result.drifted_files
 
-    def test_commit_refuses_fifo_replacement(
+    def test_seal_refuses_fifo_replacement(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         p = artifact_dir / "result.json"
         p.write_text("original")
         rec = store.create_pending(
+            **PROVENANCE,
             run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
         )
         p.unlink()
         os.mkfifo(p)
 
         with pytest.raises(ArtifactDriftError):
-            _within(5, lambda: store.commit(rec.record_id))
+            _within(5, lambda: store.seal(rec.record_id))
         assert store.get(rec.record_id).state is ArtifactState.PENDING
 
 
@@ -211,44 +214,43 @@ class TestFreshOutputDirectory:
 
 
 # ---------------------------------------------------------------------------
-# 4 — duplicate_policy="ignore" leaves the existing record alone
+# 4 — A later run never finalizes an earlier run's record (#12)
 # ---------------------------------------------------------------------------
 
-class TestDuplicateIgnoreTransaction:
+class TestLaterRunLeavesEarlierRecordAlone:
 
-    def test_block_error_propagates_and_existing_record_untouched(
+    def test_block_error_fails_only_the_new_run(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         (artifact_dir / "result.json").write_text("same bytes")
-        with ledger_transaction(store, _result(artifact_dir)) as first:
+        with ledger_transaction(store, _result(artifact_dir), **PROVENANCE) as first:
             pass
-        assert store.get(first.record_id).state is ArtifactState.COMMITTED
+        assert store.get(first.record_id).state is ArtifactState.SEALED
 
         class AdapterError(RuntimeError):
             pass
 
         with pytest.raises(AdapterError):
-            with ledger_transaction(
-                store, _result(artifact_dir), duplicate_policy="ignore"
-            ) as existing:
-                assert existing.record_id == first.record_id
-                raise AdapterError("downstream write failed")
+            with ledger_transaction(store, _result(artifact_dir), **PROVENANCE) as second:
+                assert second.record_id != first.record_id
+                raise AdapterError("check failed")
 
-        assert store.get(first.record_id).state is ArtifactState.COMMITTED
+        assert store.get(first.record_id).state is ArtifactState.SEALED
+        assert store.get(second.record_id).state is ArtifactState.FAILED
 
-    def test_clean_exit_does_not_recommit_existing_record(
+    def test_recording_the_same_run_twice_is_refused_before_the_block(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
         (artifact_dir / "result.json").write_text("same bytes")
-        with ledger_transaction(store, _result(artifact_dir)) as first:
+        result = _result(artifact_dir)
+        with ledger_transaction(store, result, **PROVENANCE) as first:
             pass
 
-        with ledger_transaction(
-            store, _result(artifact_dir), duplicate_policy="ignore"
-        ) as existing:
-            assert existing.record_id == first.record_id
+        with pytest.raises(DuplicateRunError):
+            with ledger_transaction(store, result, **PROVENANCE):
+                pytest.fail("block must not run for a run that is already recorded")
 
-        assert store.get(first.record_id).state is ArtifactState.COMMITTED
+        assert store.get(first.record_id).state is ArtifactState.SEALED
 
 
 # ---------------------------------------------------------------------------
@@ -260,8 +262,8 @@ class TestBulkInvalidation:
     def test_already_invalidated_candidates_are_skipped(
         self, store: LedgerStore, artifact_dir: Path
     ) -> None:
-        done = _commit(store, artifact_dir, "a.json", "a")
-        pending = _commit(store, artifact_dir, "b.json", "b")
+        done = _seal(store, artifact_dir, "a.json", "a")
+        pending = _seal(store, artifact_dir, "b.json", "b")
         (artifact_dir / "a.json").write_text("a drifted")
         (artifact_dir / "b.json").write_text("b drifted")
         invalidate_record(store, done, InvalidationReason.MANUAL, note="already handled")

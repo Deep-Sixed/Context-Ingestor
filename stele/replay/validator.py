@@ -1,7 +1,7 @@
 """
 Stele Phase G — artifact validator.
 
-Validates a single committed ArtifactRecord against the filesystem by
+Validates a single sealed ArtifactRecord against the filesystem by
 re-hashing every file in its manifest and comparing to the ledger.
 
 Does NOT modify the ledger.  Detection only — callers decide what to do

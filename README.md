@@ -36,6 +36,13 @@ Stele adapter contract (Phase H) and the Dispatcher write path.
 **99 Stele tests** in this repo. RAG×Stele integration tests (31) remain in
 `EVECOR/DataCore/RAG/` until adapters move with cutover.
 
+**Ledger redesign (#12), after v1.0:** records are per run, and a record is
+`sealed` once its bundle is stored in the evidence archive and verified.
+Sealed is not delivered, which replaces v1.0's `committed`. Each record
+stores its input Snapshot digest and its parser identity and config. The
+ledger API changed accordingly (`LedgerStore(db, archive)`, `seal()`,
+`record_run()`). Existing ledgers migrate on open. See `docs/F-ledger.md`.
+
 ## Gate
 
 **RAG-ANYTHING: PROCEED — Stele-gated ingestion with scoped tombstone support.**

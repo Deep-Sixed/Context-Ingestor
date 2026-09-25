@@ -7,9 +7,9 @@ attempt in its own dispatch log — separately from the artifact ledger.
 
 Key invariants:
   - Adapter failure (transform() raises) → DispatchResult(status="failed");
-    the source ArtifactRecord stays COMMITTED.
+    the source ArtifactRecord stays SEALED.
   - Target write failure → DispatchResult(status="failed");
-    the source ArtifactRecord stays COMMITTED.
+    the source ArtifactRecord stays SEALED.
   - Invalidation is a caller decision based on DispatchResult, not automatic.
   - The dispatch log is separate from the ledger — callers join them by record_id
     if they need a combined view.
@@ -81,7 +81,7 @@ class Dispatcher:
         dispatcher = Dispatcher()
         dispatcher.register_target(LightRAGTarget, my_lightrag_writer)
 
-        result = dispatcher.dispatch(my_adapter, committed_record, LightRAGTarget("default"))
+        result = dispatcher.dispatch(my_adapter, sealed_record, LightRAGTarget("default"))
 
     The adapter is called inside dispatch().  It never receives the target writer.
     """
@@ -100,7 +100,7 @@ class Dispatcher:
         record: ArtifactRecord,
         target: SteleTarget,
     ) -> DispatchResult:
-        """Run the full dispatch cycle for one committed record.
+        """Run the full dispatch cycle for one sealed record.
 
         Steps:
           1. Call adapter.transform(record) → list[SteleChunk]

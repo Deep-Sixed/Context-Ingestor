@@ -6,7 +6,7 @@ These four tests prove the four required properties:
   PASS 1 — Parser runs inside the sandbox and produces an allowed artifact.
   PASS 2 — Parser cannot write outside approved directories (home, mnt).
   PASS 3 — Exit code, stdout, stderr are faithfully captured.
-  PASS 4 — Sandbox failure / ephemeral writes do not produce committed artifacts.
+  PASS 4 — Sandbox failure / ephemeral writes do not produce sealed artifacts.
 
 Run with:
     cd EVECOR/services/stele
@@ -233,7 +233,7 @@ class TestNoDurableWriteOutsideArtifactDir:
         )
 
     def test_failed_parser_produces_no_artifacts(self, tmp_path: Path, sandbox_python: str) -> None:
-        """A crashing parser must not leave partial artifacts that could be committed."""
+        """A crashing parser must not leave partial artifacts that could be sealed."""
         config = SandboxConfig(
             command=[sandbox_python, "-c", "raise RuntimeError('crash before any write')"],
             artifact_dir=tmp_path / "artifacts",
@@ -241,7 +241,7 @@ class TestNoDurableWriteOutsideArtifactDir:
         result = run_in_sandbox(config)
         assert not result.succeeded
         assert not result.produced_artifacts, (
-            "a crashing parser left artifacts — Phase F must never commit these"
+            "a crashing parser left artifacts — Phase F must never seal these"
         )
 
 

@@ -23,7 +23,7 @@ class SteleAdapter(Protocol):
 ```
 
 Key design decision vs. earlier stub: `transform()` is separated from writing.
-The adapter reads a committed artifact and returns typed chunks.  It never
+The adapter reads a sealed artifact and returns typed chunks.  It never
 receives a DB handle, target connection, or writer reference.  All writes are
 owned by the Dispatcher.
 
@@ -32,8 +32,13 @@ owned by the Dispatcher.
 > boundary — Python cannot stop an adapter from opening its own connections
 > (see `test_phase_h_adapter_contract.py`, side-channel test). Only parser
 > execution is sandboxed. The Dispatcher also does not yet check the record's
-> ledger state or call `on_invalidation()`; both are tracked for the
-> Snapshot/Extraction redesign.
+> ledger state or call `on_invalidation()`; both are tracked for durable
+> dispatch (#13).
+
+A record reaches adapters once it is **sealed**: its bundle is archived and
+verified. Sealed says nothing about delivery; delivery outcomes live in the
+dispatch log, never in the ledger state. Ledger states are defined once, in
+[F-ledger.md](F-ledger.md#state-machine).
 
 `SteleChunk` fields: `chunk_id`, `content`, `content_hash` (sha256 verified),
 `token_count`, `metadata`.
@@ -47,7 +52,7 @@ owned by the Dispatcher.
 ## Dispatcher (`contracts/dispatcher.py`)
 
 ```
-committed ArtifactRecord
+sealed ArtifactRecord
       │
       ▼
 Dispatcher.dispatch(adapter, record, target)
@@ -67,7 +72,7 @@ artifact ledger.  Join on `record_id` if a combined view is needed.
 
 | Proof | Test class |
 |-------|-----------|
-| Committed artifact passed to adapter | `TestAdapterReceivesCommittedRecord` |
+| Sealed artifact passed to adapter | `TestAdapterReceivesSealedRecord` |
 | Adapter returns typed SteleChunk records | `TestAdapterReturnsTypedChunks` |
 | Invalid adapter output rejected (empty, bad hash, dup ids) | `TestInvalidAdapterOutputRejected` |
 | Adapter cannot bypass dispatcher write path | `TestAdapterCannotBypassDispatcher` |

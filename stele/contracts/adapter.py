@@ -5,7 +5,7 @@ The SteleAdapter protocol is the only authorized write boundary between
 parser output and production storage targets.
 
 Rules:
-  - Adapters receive a committed ArtifactRecord and return list[SteleChunk].
+  - Adapters receive a sealed ArtifactRecord and return list[SteleChunk].
   - Adapters do NOT receive DB connections, file handles, or target objects.
   - Adapters do NOT call Hindsight, Graphify, or LightRAG APIs directly.
   - All target writes are routed through the Dispatcher (contracts/dispatcher.py).
@@ -120,7 +120,7 @@ class SteleAdapter(Protocol):
     Implement this protocol to route parser artifacts through Stele.
 
     transform() is the ONLY method called by the Dispatcher.  It receives a
-    committed ArtifactRecord (no DB handles, no target connections) and returns
+    sealed ArtifactRecord (no DB handles, no target connections) and returns
     the chunks to be written.
 
     on_invalidation() is intended to be called when a previously dispatched
@@ -130,7 +130,7 @@ class SteleAdapter(Protocol):
     """
 
     def transform(self, record: ArtifactRecord) -> list[SteleChunk]:
-        """Read the committed artifact and return normalized chunks.
+        """Read the sealed artifact and return normalized chunks.
 
         Must not write to any external store.
         Must not hold references to DB connections or target objects.

@@ -1,7 +1,7 @@
 """
 Stele Phase G — invalidation operations.
 
-Invalidation marks committed (or pending) records as INVALIDATED so that
+Invalidation marks sealed (or pending) records as INVALIDATED so that
 Phase H adapters know to remove or tombstone the corresponding data from
 their target stores.
 
@@ -24,7 +24,7 @@ def invalidate_record(
 ) -> ArtifactRecord:
     """Invalidate a single record by ID.
 
-    Transitions PENDING or COMMITTED → INVALIDATED.
+    Transitions PENDING or SEALED → INVALIDATED.
     The reason and optional note are stored in the record's error field as:
       "INVALIDATED: <reason.value> — <note>"
     """
@@ -41,17 +41,15 @@ def invalidate_by_source_hash(
     *,
     note: str = "",
 ) -> list[ArtifactRecord]:
-    """Invalidate every COMMITTED or PENDING record derived from source_hash.
+    """Invalidate every SEALED or PENDING record over the input Snapshot source_hash.
 
     Useful when the upstream source file is updated — all previously
-    committed artifacts derived from the old version become invalid.
+    sealed artifacts derived from the old version become invalid.
     Returns the list of newly invalidated records.
     """
-    from ..ledger.models import ArtifactState
-
     candidates = [
-        r for r in store.list_by_states([ArtifactState.COMMITTED, ArtifactState.PENDING])
-        if r.source_hash == source_hash
+        r for r in store.find_by_source_hash(source_hash)
+        if r.state in (ArtifactState.SEALED, ArtifactState.PENDING)
     ]
 
     invalidated: list[ArtifactRecord] = []

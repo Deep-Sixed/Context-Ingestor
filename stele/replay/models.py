@@ -8,17 +8,17 @@ from ..ledger.models import ArtifactRecord
 
 
 class InvalidationReason(str, Enum):
-    """Named reasons for invalidating a committed artifact record."""
-    DRIFT_DETECTED = "drift_detected"       # artifact files changed since commit
+    """Named reasons for invalidating a sealed artifact record."""
+    DRIFT_DETECTED = "drift_detected"       # artifact files changed since sealing
     SOURCE_CHANGED = "source_changed"       # upstream source was updated
     PARSER_UPDATED = "parser_updated"       # parser version changed, re-parse needed
-    DATA_QUALITY = "data_quality"           # quality check failed on committed artifact
+    DATA_QUALITY = "data_quality"           # quality check failed on sealed artifact
     MANUAL = "manual"                       # explicit operator decision
 
 
 @dataclass(frozen=True)
 class ValidationResult:
-    """Outcome of re-hashing one committed artifact record against the filesystem."""
+    """Outcome of re-hashing one sealed artifact record against the filesystem."""
 
     record_id: str
     # "ok"      — all files present and hashes match
@@ -46,7 +46,7 @@ class ValidationResult:
 
 @dataclass(frozen=True)
 class ReplayCandidate:
-    """A committed record paired with its current validation result."""
+    """A sealed record paired with its current validation result."""
 
     record: ArtifactRecord
     validation: ValidationResult

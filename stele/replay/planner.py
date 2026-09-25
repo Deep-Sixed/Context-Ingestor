@@ -1,13 +1,13 @@
 """
 Stele Phase G — replay planner.
 
-Selects committed ledger records and validates them against the filesystem
+Selects sealed ledger records and validates them against the filesystem
 to produce a ReplayPlan.  The plan tells callers which records are clean and
 replayable versus which have drifted or lost their artifact files.
 
 Does NOT re-run parsers — that would be a higher-level orchestration step
 using the adapter contract (Phase H).  Phase G only answers the question:
-"are these committed artifacts still trustworthy?"
+"are these sealed artifacts still trustworthy?"
 """
 from __future__ import annotations
 
@@ -24,9 +24,9 @@ def plan_replay(
     run_id: str | None = None,
     source_path: str | None = None,
 ) -> ReplayPlan:
-    """Build a ReplayPlan from committed ledger records.
+    """Build a ReplayPlan from sealed ledger records.
 
-    By default only COMMITTED records are considered.  Set
+    By default only SEALED records are considered.  Set
     include_invalidated=True to also include INVALIDATED records (useful
     for audit or forced re-ingestion passes).
 
@@ -37,7 +37,7 @@ def plan_replay(
     Each candidate is validated against the filesystem (validate_artifact)
     so the plan immediately reflects any drift or missing files.
     """
-    states = [ArtifactState.COMMITTED]
+    states = [ArtifactState.SEALED]
     if include_invalidated:
         states.append(ArtifactState.INVALIDATED)
 
