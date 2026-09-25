@@ -117,6 +117,8 @@ def run_in_sandbox(
         timed_out=outcome.timed_out,
         input_sha256=input_sha256,
         backend=chosen.name,
+        hardening=outcome.hardening,
+        violation=outcome.violation,
     )
 
 
@@ -177,6 +179,8 @@ def _main() -> None:
         "timed_out": result.timed_out,
         "wall_time_seconds": round(result.wall_time_seconds, 3),
         "backend": result.backend,
+        "hardening": list(result.hardening),
+        "violation": result.violation,
         "input_sha256": result.input_sha256,
         "artifact_paths": [str(p) for p in result.artifact_paths],
         "stdout": result.stdout,

@@ -26,6 +26,12 @@ class SandboxResult:
     input_sha256: str | None = None
     # Name of the sandbox backend that executed the run, e.g. "bubblewrap".
     backend: str | None = None
+    # Kernel hardening layers the backend applied to this run, e.g.
+    # ("seccomp", "landlock"). Empty when only namespaces were used.
+    hardening: tuple[str, ...] = ()
+    # Why the backend stopped the parser for breaking sandbox policy, e.g. a
+    # blocked system call; None when no violation was detected.
+    violation: str | None = None
 
     @property
     def succeeded(self) -> bool:
