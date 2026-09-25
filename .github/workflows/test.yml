@@ -38,8 +38,12 @@ jobs:
           /usr/bin/python3 -m venv .venv
           .venv/bin/pip install -e '.[dev]'
       - name: Register gVisor with Docker
+        # --network=none: gVisor builds no network stack at all (loopback
+        # only). Parsers never get a network, and Docker's --network none
+        # alone is refused by runsc on these runners ("cannot run with
+        # network enabled in root network namespace").
         run: |
-          sudo runsc install
+          sudo runsc install -- --network=none
           sudo systemctl restart docker
           docker info --format '{{json .Runtimes}}' | grep -q runsc
       - name: Fetch the pinned parser image (trusted acquisition step)

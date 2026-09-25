@@ -72,7 +72,9 @@ as the entrypoint of the image, so it must resolve inside the image (e.g.
   identity (#12).
 - **Runtimes.** `runc` by default; `OciBackend(runtime="runsc")` selects
   gVisor. A runtime the engine does not have makes the backend unavailable
-  with that reason — it is never replaced by another runtime.
+  with that reason — it is never replaced by another runtime. Register gVisor
+  with `runsc install -- --network=none` so it builds no network stack at all;
+  CI does this, and some Docker hosts refuse runsc with `--network none` alone.
 - **GPU.** `OciBackend(gpu=True)` passes NVIDIA GPUs through with CDI
   (`--device nvidia.com/gpu=all`) or Docker's `--gpus all`, and is unavailable
   ("no usable GPU") when the engine exposes none. gVisor supports GPUs only via

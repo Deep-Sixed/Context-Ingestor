@@ -238,7 +238,7 @@ class TestArgv:
             seen["argv"] = argv
             return subprocess.CompletedProcess(argv, 0, "", "")
 
-        monkeypatch.setattr(os, "getuid", lambda: 0)
+        monkeypatch.setattr(oci_module, "_host_ids", lambda: (0, 0))
         monkeypatch.setattr(oci_module, "_RootHandoff", _NoopHandoff)
         monkeypatch.setattr(subprocess, "run", fake_run)
         OciBackend().execute(_config(tmp_path))
@@ -418,7 +418,7 @@ class TestExecution:
 
     def test_timeout_force_removes_container(self, tmp_path: Path, monkeypatch) -> None:
         _fake_engine(monkeypatch)
-        monkeypatch.setattr(os, "getuid", lambda: 1000)
+        monkeypatch.setattr(oci_module, "_host_ids", lambda: (1000, 1000))
         calls: list[list[str]] = []
 
         def fake_run(argv, **kwargs):
@@ -437,7 +437,7 @@ class TestExecution:
 
     def test_outcome_records_image_digest(self, tmp_path: Path, monkeypatch) -> None:
         _fake_engine(monkeypatch)
-        monkeypatch.setattr(os, "getuid", lambda: 1000)
+        monkeypatch.setattr(oci_module, "_host_ids", lambda: (1000, 1000))
         monkeypatch.setattr(
             subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 3, "o", "e")
         )
@@ -485,8 +485,9 @@ class TestLiveBackendProperties:
         ))
         assert result.succeeded, result.stderr
         artifact = out / "who.json"
-        assert os.stat(artifact).st_uid == os.getuid()
-        assert os.stat(out).st_uid == os.getuid()
+        if hasattr(os, "getuid"):
+            assert os.stat(artifact).st_uid == os.getuid()
+            assert os.stat(out).st_uid == os.getuid()
         if isinstance(containment_backend, OciBackend):
             assert json.loads(artifact.read_text())["uid"] != 0, "parser ran as root"
             assert result.image_digest == containment_backend.image_digest

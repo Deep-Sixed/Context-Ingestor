@@ -372,17 +372,18 @@ class OciBackend(SandboxBackend):
 
         # Writable artifact output: the ONLY path that survives the container.
         config.artifact_dir.mkdir(parents=True, exist_ok=True)
-        argv += ["--mount", _bind(info, config.artifact_dir, SANDBOX_OUTPUT, readonly=False)]
+        argv += ["--mount", _bind(info, str(config.artifact_dir), SANDBOX_OUTPUT, readonly=False)]
 
         env: dict[str, str] = {"STELE_OUTPUT_DIR": SANDBOX_OUTPUT}
         if config.input_path is not None:
             input_dest = f"{SANDBOX_INPUT_DIR}/{config.input_path.name}"
-            argv += ["--mount", _bind(info, config.input_path, input_dest, readonly=True)]
+            argv += ["--mount", _bind(info, str(config.input_path), input_dest, readonly=True)]
             env["STELE_INPUT_PATH"] = input_dest
         if config.script_path is not None:
-            argv += ["--mount", _bind(info, config.script_path, SANDBOX_SCRIPT, readonly=True)]
+            argv += ["--mount", _bind(info, str(config.script_path), SANDBOX_SCRIPT, readonly=True)]
         for src, dst in config.extra_ro_binds:
-            argv += ["--mount", _bind(info, Path(src), dst, readonly=True)]
+            # Passed through as given: a host path string, never re-rendered.
+            argv += ["--mount", _bind(info, src, dst, readonly=True)]
 
         # The image's own environment (PATH etc.) is kept; the host's never is.
         env.update(config.env)
@@ -404,8 +405,7 @@ class OciBackend(SandboxBackend):
             raise SandboxUnavailableError(self.unavailable_reason())
 
         rootless_podman = probe.info.kind == "podman" and probe.info.rootless
-        host_uid = os.getuid() if hasattr(os, "getuid") else _NOBODY
-        host_gid = os.getgid() if hasattr(os, "getgid") else _NOBODY
+        host_uid, host_gid = _host_ids()
         if rootless_podman:
             user: tuple[int, int] | None = None
         elif host_uid == 0:
@@ -502,7 +502,14 @@ def _walk_no_follow(root: Path) -> list[str]:
     return paths
 
 
-def _bind(info: EngineInfo, src: Path, dst: str, *, readonly: bool) -> str:
+def _host_ids() -> tuple[int, int]:
+    """The invoking uid:gid; nobody where the host has no POSIX ids (Windows)."""
+    if hasattr(os, "getuid") and hasattr(os, "getgid"):
+        return os.getuid(), os.getgid()
+    return _NOBODY, _NOBODY
+
+
+def _bind(info: EngineInfo, src: str, dst: str, *, readonly: bool) -> str:
     """A --mount value. Refuses characters that would change the mount spec."""
     fields = ["type=bind", f"source={src}", f"target={dst}"]
     if readonly:
