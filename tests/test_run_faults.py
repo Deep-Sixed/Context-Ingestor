@@ -432,3 +432,69 @@ def test_cli_reports_failure_and_telemetry(tmp_path: Path) -> None:
     report = json.loads(out.stdout)
     assert report["failure"]["reason"] == "exit_status"
     assert report["telemetry"]["backend"] == "wasmtime"
+
+
+# ---------------------------------------------------------------------------
+# Output limits: what a run may leave in /stele/output
+# ---------------------------------------------------------------------------
+
+class _Writes(_Plain):
+    """Leaves the given {relative path: size} files in the output."""
+
+    def __init__(self, files: dict[str, int]) -> None:
+        super().__init__(ExecutionOutcome(0, "", "", 0.1))
+        self.files = files
+
+    def execute(self, config):
+        config.artifact_dir.mkdir(parents=True, exist_ok=True)
+        for rel, size in self.files.items():
+            path = config.artifact_dir / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.truncate(size)  # sparse: the size is what the limit counts
+        return self.outcome
+
+
+@pytest.mark.parametrize(
+    ("files", "limits", "message"),
+    [
+        ({"a.bin": 600, "b/c.bin": 600}, {"max_output_bytes": 1000}, "more than 1000 bytes"),
+        ({f"f{i}.txt": 1 for i in range(6)}, {"max_output_files": 5}, "more than 5 files"),
+    ],
+    ids=["bytes", "files"],
+)
+def test_output_over_its_limit_fails_the_run_and_is_removed(
+    tmp_path: Path, files, limits, message
+) -> None:
+    from stele.archive.store import BlobStore
+
+    store = BlobStore(tmp_path / "archive")
+    out = tmp_path / "out"
+    result = run_in_sandbox(
+        SandboxConfig(command=["x"], artifact_dir=out, **limits), backend=_Writes(files),
+        store=store,
+    )
+    assert result.failure is not None and result.failure.reason is FailureReason.OUTPUT_LIMIT
+    assert message in result.failure.detail
+    assert not result.succeeded and result.artifact_paths == []
+    assert not out.exists()  # the runner created it, so it is gone
+    assert result.artifact_bundle_digest is None and result.artifact_digests == {}
+    assert not any((store.root / "blobs").rglob("*"))  # nothing reached the archive
+
+
+def test_output_at_its_limit_is_kept(tmp_path: Path) -> None:
+    result = run_in_sandbox(
+        SandboxConfig(command=["x"], artifact_dir=tmp_path / "out",
+                      max_output_bytes=1000, max_output_files=2),
+        backend=_Writes({"a.bin": 500, "b.bin": 500}),
+    )
+    assert result.failure is None
+    assert sorted(p.name for p in result.artifact_paths) == ["a.bin", "b.bin"]
+
+
+def test_default_output_limits() -> None:
+    from stele.containment.sandbox import DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_MAX_OUTPUT_FILES
+
+    config = SandboxConfig(command=["x"], artifact_dir=Path("out"))
+    assert config.max_output_bytes == DEFAULT_MAX_OUTPUT_BYTES == 4 * 1024 ** 3
+    assert config.max_output_files == DEFAULT_MAX_OUTPUT_FILES

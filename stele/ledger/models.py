@@ -70,8 +70,10 @@ class RunConditions:
     """How a run was executed: the device and the limits it ran under.
 
     Recorded by Stele's own runner (stele.parsers.replay.record_parser_run
-    takes it from the ParserRun, which applied it), never asserted by a
-    caller, so a replay can run the parser the same way (roadmap #30).
+    takes it from the ParserRun, which applied it) so a replay can run the
+    parser the same way (roadmap #30). The ledger checks every stated
+    condition against the limits the backend reported applying, so a caller
+    cannot record conditions the run did not execute under.
     """
 
     device: str = "cpu"                 # "cpu" or "gpu": which image variant ran

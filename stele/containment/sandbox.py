@@ -30,6 +30,11 @@ _SYS_RO_TRY = ["/lib", "/lib64", "/lib32", "/lib/x86_64-linux-gnu"]
 _EPHEMERAL_TMPFS = ["/home", "/mnt", "/root", "/run", "/var"]
 
 
+# Defaults for SandboxConfig.max_output_bytes / max_output_files.
+DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 ** 3
+DEFAULT_MAX_OUTPUT_FILES = 100_000
+
+
 @dataclass
 class SandboxConfig:
     """Everything needed to construct and run one sandboxed parser invocation."""
@@ -70,6 +75,14 @@ class SandboxConfig:
     # exits, so nothing written there is ever persisted or seen by another
     # run. Set False to allow writes only under /stele/output.
     writable_scratch: bool = True
+
+    # Limits on what the run may leave in /stele/output. Checked when the
+    # output is collected, before anything is stored in the archive; a run
+    # over either limit fails with FailureReason.OUTPUT_LIMIT and its output
+    # is removed. (While the parser runs, its writes are bounded only by the
+    # host filesystem holding artifact_dir.)
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
+    max_output_files: int = DEFAULT_MAX_OUTPUT_FILES
 
 
 @dataclass(frozen=True)

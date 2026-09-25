@@ -37,7 +37,8 @@ from stele.containment.backend import (
 )
 from stele.containment.oci import DEFAULT_OCI_IMAGE, OciBackend
 from stele.ledger.models import ParserIdentity as ParserIdentityRecord
-from stele.ledger.models import RunConditions
+from stele.ledger.models import ArtifactState, RunConditions
+from stele.ledger.store import ProvenanceError
 from stele.ledger.transaction import record_run
 from stele.parsers import (
     CONFIG_ENV,
@@ -118,6 +119,12 @@ class FakeBackend(SandboxBackend):
         return ExecutionOutcome(
             exit_code=self.exit_code, stdout="", stderr="boom: bad page 3\n",
             wall_time_seconds=0.1, timed_out=self.timed_out, image_digest=DIGEST,
+            # Reported like OciBackend's: the ledger checks recorded run
+            # conditions against them.
+            limits={
+                "timeout_seconds": config.timeout_seconds, "memory": self.memory,
+                "cpus": self.cpus, "pids": self.pids_limit, "gpu": self.gpu,
+            },
         )
 
 
@@ -473,6 +480,53 @@ class TestReplay:
         assert result.differences == ("bytes differ: document.md",)
 
     # -- run conditions (roadmap #30) ---------------------------------------
+
+    def _unrecorded_run(self, tmp_path: Path, doc: Path, backend: FakeBackend):
+        ledger = open_ledger(tmp_path / "ledger.db")
+        run = run_parser(self.POLICY_PARSER, doc, tmp_path / "out", store=ledger.archive,
+                         backend=backend)
+        assert run.succeeded, run.failure
+        return ledger, run
+
+    @pytest.mark.parametrize(
+        "stated, complaint",
+        [
+            (RunConditions(device="gpu"), "device 'gpu', but the run used the cpu"),
+            (RunConditions(memory="8g"), "memory='8g', but the backend applied '512m'"),
+            (RunConditions(cpus=16), "cpus=16.0, but the backend applied 2.5"),
+            (RunConditions(pids_limit=4096), "pids_limit=4096"),
+            (RunConditions(timeout_seconds=5), "timeout_seconds=5"),
+        ],
+        ids=["device", "memory", "cpus", "pids", "timeout"],
+    )
+    def test_stated_run_conditions_must_be_the_applied_ones(
+        self, doc: Path, tmp_path: Path, stated: RunConditions, complaint: str
+    ) -> None:
+        ledger, run = self._unrecorded_run(tmp_path, doc, FakeBackend(write=self._files(self.LAYOUT)))
+        with pytest.raises(ProvenanceError, match="not the ones the run executed under") as info:
+            record_run(ledger, run.result, parser=ParserIdentityRecord("fake", "1.0"),
+                       parser_config=dict(run.identity.config), run_conditions=stated)
+        assert complaint in str(info.value)
+        assert ledger.list_by_states(list(ArtifactState)) == []  # nothing recorded
+
+    def test_conditions_a_backend_does_not_report_are_refused(
+        self, doc: Path, tmp_path: Path
+    ) -> None:
+        class Silent(FakeBackend):
+            def execute(self, config):
+                outcome = super().execute(config)
+                return replace(outcome, limits={"timeout_seconds": config.timeout_seconds})
+
+        ledger, run = self._unrecorded_run(tmp_path, doc, Silent(write=self._files(self.LAYOUT)))
+        identity = ParserIdentityRecord("fake", "1.0")
+        with pytest.raises(ProvenanceError, match="does not report applying"):
+            record_run(ledger, run.result, parser=identity, parser_config={},
+                       run_conditions=RunConditions(memory="512m"))
+        # What it did report can be recorded.
+        timeout = run.identity.timeout_seconds
+        record = record_run(ledger, run.result, parser=identity, parser_config={},
+                            run_conditions=RunConditions(timeout_seconds=timeout))
+        assert record.run_conditions == RunConditions(timeout_seconds=timeout)
 
     GPU_PARSER = replace(POLICY_PARSER, gpu="optional", gpu_image="localhost/stele/fake-gpu:1.0")
 
