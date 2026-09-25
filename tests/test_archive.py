@@ -54,7 +54,12 @@ from stele.ledger.hashing import UnsafeFileError, build_manifest, encode_manifes
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON = str(Path(sys.executable).resolve())
-BASE = {Capability.FILESYSTEM_ISOLATION, Capability.NETWORK_ISOLATION}
+# Isolation plus the workload kind every host-process parser requires (#7).
+BASE = {
+    Capability.FILESYSTEM_ISOLATION,
+    Capability.NETWORK_ISOLATION,
+    Capability.HOST_PROCESS,
+}
 
 requires_bwrap = pytest.mark.skipif(
     sys.platform != "linux" or shutil.which("bwrap") is None,

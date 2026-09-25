@@ -30,6 +30,9 @@ class SandboxResult:
     input_sha256: str | None = None
     # Name of the sandbox backend that executed the run, e.g. "bubblewrap".
     backend: str | None = None
+    # SHA-256 of the WebAssembly module binary that ran (Wasm backends only);
+    # together with the backend name it identifies the parser.
+    module_sha256: str | None = None
     # Kernel hardening layers the backend applied to this run, e.g.
     # ("seccomp", "landlock"). Empty when only namespaces were used.
     hardening: tuple[str, ...] = ()

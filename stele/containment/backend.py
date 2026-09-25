@@ -1,11 +1,18 @@
 """
 Sandbox backends and capability matching (roadmap #5).
 
-A backend is one isolation technology (bubblewrap today; Wasm/WASI and OCI
+A backend is one isolation technology (bubblewrap and Wasmtime today; OCI
 containers later). Each backend declares the guarantees it enforces and the
 workloads it can host. Each parser declares its requirements. Stele runs a
 parser only on a backend that satisfies every requirement and never falls back
 to unsandboxed execution.
+
+Every parser is exactly one kind of workload: a host process (config.command
+is an executable run in the sandbox, the default) or a WebAssembly module
+(config.command[0] is a .wasm/.wat file, ParserRequirements.wasm_module=True).
+The workload kind is a required capability like any other, so a Python-script
+parser can never be routed to the Wasm backend and a Wasm module can never be
+routed to bubblewrap, whatever the registry order.
 
 Parsers cannot request network access: there is deliberately no requirement or
 capability for it. Model weights and other dependencies are fetched in a
@@ -37,6 +44,8 @@ class Capability(enum.Enum):
     DETERMINISTIC = "deterministic"                # fixed clock/entropy; same input -> same output
 
     # Hostable workloads
+    HOST_PROCESS = "host_process"                  # runs a host executable as config.command
+    WASM_MODULE = "wasm_module"                    # runs a WebAssembly/WASI module
     GPU = "gpu"                                    # GPU devices passed through
     NATIVE_LIBS = "native_libs"                    # arbitrary native code (C extensions, PyTorch)
 
@@ -59,9 +68,12 @@ class ParserRequirements:
     requires_gpu: bool = False
     requires_native_libs: bool = False
     deterministic: bool = False
+    # The parser is a WebAssembly module rather than a host executable.
+    wasm_module: bool = False
 
     def required_capabilities(self) -> frozenset[Capability]:
         needed = set(BASELINE_CAPABILITIES)
+        needed.add(Capability.WASM_MODULE if self.wasm_module else Capability.HOST_PROCESS)
         if self.requires_gpu:
             needed.add(Capability.GPU)
         if self.requires_native_libs:
@@ -95,6 +107,9 @@ class ExecutionOutcome:
     stderr: str
     wall_time_seconds: float
     timed_out: bool = False
+    # SHA-256 of the executed WebAssembly module binary, part of the parser's
+    # identity. None for host-process backends.
+    module_sha256: str | None = None
     # Kernel hardening layers applied to this run, e.g. ("seccomp", "landlock").
     hardening: tuple[str, ...] = ()
     # Set when the parser was stopped for breaking sandbox policy.
@@ -149,6 +164,7 @@ class BubblewrapBackend(SandboxBackend):
         caps = {
             Capability.FILESYSTEM_ISOLATION,
             Capability.NETWORK_ISOLATION,
+            Capability.HOST_PROCESS,
             Capability.NATIVE_LIBS,
         }
         if self.seccomp_program() is not None:
@@ -261,8 +277,17 @@ def _decode(raw: bytes | str | None) -> str:
 
 
 def default_backends() -> list[SandboxBackend]:
-    """Registered backends in preference order."""
-    return [BubblewrapBackend()]
+    """Registered backends in preference order.
+
+    The two backends host disjoint workloads (host processes vs. Wasm modules),
+    so their relative order never changes which one a parser gets: selection
+    is decided by the workload capability, and order only breaks ties between
+    backends hosting the same kind of workload. Bubblewrap stays first so the
+    default (host-process) parser keeps its existing backend.
+    """
+    from .wasm import WasmtimeBackend
+
+    return [BubblewrapBackend(), WasmtimeBackend()]
 
 
 def select_backend(
@@ -290,8 +315,8 @@ def select_backend(
             continue
         return backend
 
-    if capable_but_unavailable and len(capable_but_unavailable) == len(candidates):
-        # Every backend could satisfy the parser; this host just can't run any.
+    if capable_but_unavailable:
+        # Some backend could satisfy the parser; this host just can't run it.
         raise SandboxUnavailableError(
             " ".join(b.unavailable_reason() for b in capable_but_unavailable)
         )

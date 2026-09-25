@@ -73,6 +73,7 @@ Stele/
 ├── stele/                  ← Python package
 │   ├── containment/
 │   ├── archive/            ← content-addressed evidence store (#16)
+│   ├── extractors/         ← Wasm extractors (run on the Wasmtime backend)
 │   ├── ledger/
 │   ├── replay/
 │   └── contracts/

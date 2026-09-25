@@ -67,7 +67,9 @@ def run_in_sandbox(
     """Execute config.command in a sandbox and return the result.
 
     The backend is chosen by capability matching against requirements (default:
-    no GPU, no native-library needs, not deterministic) unless one is passed
+    a host-process parser with no GPU or native-library needs, not
+    deterministic; pass ParserRequirements(wasm_module=True) for a Wasm
+    module) unless one is passed
     explicitly; an explicit backend must still satisfy the requirements. If no
     backend qualifies, UnsupportedBackendError (or its subclass
     SandboxUnavailableError) is raised before anything is staged or executed.
@@ -141,6 +143,7 @@ def run_in_sandbox(
         timed_out=outcome.timed_out,
         input_sha256=input_sha256,
         backend=chosen.name,
+        module_sha256=outcome.module_sha256,
         hardening=outcome.hardening,
         violation=outcome.violation,
         input_snapshot=input_snapshot,
@@ -160,7 +163,7 @@ def _main() -> None:
 
     ap = argparse.ArgumentParser(
         prog="python -m stele.containment.runner",
-        description="Run COMMAND inside the Stele bubblewrap sandbox.",
+        description="Run COMMAND inside a Stele sandbox (bubblewrap, or Wasmtime with --wasm).",
     )
     ap.add_argument("--artifact-dir", required=True, type=Path, metavar="DIR",
                     help="Host directory bind-mounted as /stele/output (created if absent).")
@@ -170,6 +173,11 @@ def _main() -> None:
     ap.add_argument("--script", type=Path, default=None, dest="script_path", metavar="PATH",
                     help="Parser script exposed at /stele/parser (read-only).")
     ap.add_argument("--timeout", type=int, default=300, metavar="SECONDS")
+    ap.add_argument("--wasm", action="store_true",
+                    help="COMMAND[0] is a WebAssembly module (.wasm or .wat) run on the "
+                         "Wasmtime backend.")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="Require a deterministic backend (fixed clock and entropy).")
     ap.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
                     help="Environment variable to inject (repeatable).")
     ap.add_argument("command", nargs=argparse.REMAINDER,
@@ -197,7 +205,9 @@ def _main() -> None:
         env=env,
     )
 
-    result = run_in_sandbox(config)
+    result = run_in_sandbox(config, requirements=ParserRequirements(
+        wasm_module=args.wasm, deterministic=args.deterministic,
+    ))
 
     print(json.dumps({
         "run_id": str(result.run_id),
@@ -209,6 +219,7 @@ def _main() -> None:
         "hardening": list(result.hardening),
         "violation": result.violation,
         "input_sha256": result.input_sha256,
+        "module_sha256": result.module_sha256,
         "artifact_paths": [str(p) for p in result.artifact_paths],
         "stdout": result.stdout,
         "stderr": result.stderr,
