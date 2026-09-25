@@ -47,7 +47,7 @@ from stele.replay.engine import (
     replay_record,
 )
 from stele.replay.parsers import ParserCatalog, ParserSpec, run_parser
-from stele.replay.policy import JsonTolerancePolicy
+from stele.replay.policy import JsonTolerancePolicy, Tolerance
 from tests.ledger_helpers import PROVENANCE, open_ledger
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -306,8 +306,8 @@ class TestComparisonPolicy:
         assert "not proof of reproduction" in result.reason
         assert result.differences == ("layout.json",)
         assert result.policy == POLICY.describe() == {
-            "name": "json-tolerance", "version": 1, "rel_tol": 0.0, "abs_tol": 0.01,
-            "ignore_keys": ["generated_at"],
+            "name": "json-tolerance", "version": 2, "rel_tol": 0.0, "abs_tol": 0.01,
+            "ignore_keys": ["generated_at"], "key_tolerances": {},
         }
 
     def test_identical_bytes_are_still_only_equivalent(self, ledger, tmp_path) -> None:
@@ -319,7 +319,7 @@ class TestComparisonPolicy:
         result = self._replay(ledger, tmp_path, edge=4.5)
         assert result.outcome is ReplayOutcome.DIVERGED
         assert result.differences == (
-            "4.0 != 4.5 beyond tolerance: layout.json/blocks[0]/bbox[2]",
+            "4.0 != 4.5 beyond tolerance (rel 0.0, abs 0.01): layout.json/blocks[0]/bbox[2]",
         )
 
     def test_non_json_difference_is_diverged(self, ledger, tmp_path) -> None:
@@ -359,6 +359,111 @@ class TestJsonTolerancePolicyUnits:
     def test_negative_tolerance_is_refused(self) -> None:
         with pytest.raises(ValueError):
             JsonTolerancePolicy(abs_tol=-1)
+        with pytest.raises(ValueError):
+            Tolerance(abs_tol=-1)
+        with pytest.raises(TypeError):
+            JsonTolerancePolicy(key_tolerances={"bbox": 0.5})
+
+
+class TestPerKeyTolerance:
+    """Roadmap #29: a number is judged by its nearest enclosing named key."""
+
+    POLICY = JsonTolerancePolicy(
+        rel_tol=1e-6, abs_tol=1e-9,
+        key_tolerances={"bbox": Tolerance(abs_tol=0.5), "score": Tolerance(abs_tol=1e-3)},
+    )
+
+    def _findings(self, ledger, a: Any, b: Any, policy=None) -> tuple[str, ...]:
+        put = ledger.archive.put_bytes
+        verdict = (policy or self.POLICY).compare(
+            {"o.json": put(json.dumps(a).encode())},
+            {"o.json": put(json.dumps(b).encode())},
+            ledger.archive,
+        )
+        return verdict.findings
+
+    def test_coordinates_absorb_a_fraction_of_a_point(self, ledger) -> None:
+        assert self._findings(ledger, {"bbox": [1.0, 2.0]}, {"bbox": [1.3, 1.8]}) == ()
+
+    def test_coordinates_inside_objects_and_nested_blocks(self, ledger) -> None:
+        a = {"blocks": [{"prov": [{"bbox": {"l": 10.0, "t": 5.0}}]}]}
+        b = {"blocks": [{"prov": [{"bbox": {"l": 10.4, "t": 4.7}}]}]}
+        assert self._findings(ledger, a, b) == ()
+
+    def test_moved_coordinate_is_a_finding(self, ledger) -> None:
+        assert self._findings(ledger, {"bbox": [1.0]}, {"bbox": [1.6]}) == (
+            "1.0 != 1.6 beyond tolerance (rel 0.0, abs 0.5): o.json/bbox[0]",
+        )
+
+    def test_changed_score_is_a_finding(self, ledger) -> None:
+        # Under the old single tolerance of 0.5 this was accepted.
+        assert self._findings(ledger, {"score": 0.9}, {"score": 0.7}) == (
+            "0.9 != 0.7 beyond tolerance (rel 0.0, abs 0.001): o.json/score",
+        )
+        assert self._findings(ledger, {"score": 0.9}, {"score": 0.9004}) == ()
+
+    def test_unlisted_numbers_are_near_exact(self, ledger) -> None:
+        assert self._findings(ledger, {"angle": 1.0}, {"angle": 1.0000000001}) == ()
+        findings = self._findings(ledger, {"angle": 1.0}, {"angle": 1.01})
+        assert findings and "o.json/angle" in findings[0]
+
+    def test_describe_records_every_rule(self) -> None:
+        assert self.POLICY.describe()["key_tolerances"] == {
+            "bbox": {"rel_tol": 0.0, "abs_tol": 0.5},
+            "score": {"rel_tol": 0.0, "abs_tol": 0.001},
+        }
+
+
+class TestMlReplayPolicy:
+    """The packaged ML parsers' policy on each parser's output shape (#29)."""
+
+    def _findings(self, ledger, path: str, a: Any, b: Any) -> tuple[str, ...]:
+        from stele.parsers.catalog import ML_REPLAY_POLICY
+
+        put = ledger.archive.put_bytes
+        return ML_REPLAY_POLICY.compare(
+            {path: put(json.dumps(a).encode())}, {path: put(json.dumps(b).encode())},
+            ledger.archive,
+        ).findings
+
+    def test_mineru_middle_and_model_output(self, ledger) -> None:
+        middle = {"pdf_info": [{"page_size": [612.0, 792.0], "page_idx": 0,
+                                "para_blocks": [{"bbox": [72.0, 90.0, 540.0, 120.0]}]}]}
+        moved = {"pdf_info": [{"page_size": [612.0, 792.0], "page_idx": 0,
+                               "para_blocks": [{"bbox": [72.3, 89.8, 540.0, 120.0]}]}]}
+        assert self._findings(ledger, "middle.json", middle, moved) == ()
+        dets = {"layout_dets": [{"category_id": 1, "poly": [1.0, 2.0, 3.0, 4.0], "score": 0.97}]}
+        rescored = {"layout_dets": [{"category_id": 1, "poly": [1.2, 2.0, 3.0, 4.0], "score": 0.77}]}
+        assert self._findings(ledger, "model_output.json", dets, rescored) == (
+            "0.97 != 0.77 beyond tolerance (rel 0.0, abs 0.001): "
+            "model_output.json/layout_dets[0]/score",
+        )
+
+    def test_marker_polygons(self, ledger) -> None:
+        a = {"children": [{"polygon": [[1.0, 2.0], [3.0, 4.0]], "bbox": [1.0, 2.0, 3.0, 4.0]}]}
+        b = {"children": [{"polygon": [[1.4, 2.0], [3.0, 4.2]], "bbox": [1.4, 2.0, 3.0, 4.2]}]}
+        assert self._findings(ledger, "document.json", a, b) == ()
+
+    def test_docling_prov_and_page_size(self, ledger) -> None:
+        a = {"texts": [{"prov": [{"page_no": 1, "charspan": [0, 12],
+                                  "bbox": {"l": 72.0, "t": 700.0, "coord_origin": "BOTTOMLEFT"}}]}],
+             "pages": {"1": {"size": {"width": 612.0, "height": 792.0}}}}
+        b = {"texts": [{"prov": [{"page_no": 1, "charspan": [0, 12],
+                                  "bbox": {"l": 72.3, "t": 699.9, "coord_origin": "BOTTOMLEFT"}}]}],
+             "pages": {"1": {"size": {"width": 612.0, "height": 792.0}}}}
+        assert self._findings(ledger, "document.docling.json", a, b) == ()
+        shifted_span = json.loads(json.dumps(b))
+        shifted_span["texts"][0]["prov"][0]["charspan"] = [0, 13]
+        assert self._findings(ledger, "document.docling.json", a, shifted_span) == (
+            "12 != 13: document.docling.json/texts[0]/prov[0]/charspan[1]",
+        )
+
+    def test_confidence_and_other_floats(self, ledger) -> None:
+        assert self._findings(ledger, "x.json", {"confidence": 0.8}, {"confidence": 0.6})
+        assert self._findings(ledger, "x.json", {"line_height": 11.0}, {"line_height": 11.2})
+
+    def test_device_is_ignored(self, ledger) -> None:
+        assert self._findings(ledger, "stele-parser.json", {"device": "gpu"}, {"device": "cpu"}) == ()
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +564,36 @@ def test_catalog_refuses_duplicates() -> None:
     assert catalog.get("chatgpt-export-split", "2") is None
 
 
+def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
+    """Roadmap #30: records made before run conditions were recorded keep
+    NULL, and new records store them."""
+    from stele.ledger.models import RunConditions
+
+    db = tmp_path / "ledger.db"
+    ledger = open_ledger(db)
+    record = _record(ledger, _probe_spec(), _probe_input(tmp_path), tmp_path)
+    ledger.close()
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+    ledger = open_ledger(db)
+    migrated = ledger.get(record.record_id)
+    assert migrated.run_conditions is None
+    assert migrated.state is record.state and migrated.artifact_hash == record.artifact_hash
+    assert ledger.find_by_parser(record.parser.name, device="cpu") == []
+    conn = sqlite3.connect(db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    conn.close()
+    assert RunConditions.from_dict(RunConditions(device="gpu", cpus=2).to_dict()).cpus == 2.0
+    with pytest.raises(ValueError):
+        RunConditions(device="tpu")
+    with pytest.raises(ValueError):
+        RunConditions.from_dict({"device": "cpu", "shm": "1g"})
+
+
 def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     db = tmp_path / "ledger.db"
     open_ledger(db).close()
@@ -466,6 +601,7 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     conn.execute("DROP TRIGGER replays_append_only_u")
     conn.execute("DROP TRIGGER replays_append_only_d")
     conn.execute("DROP TABLE replays")
+    conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")  # added in v5
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -473,5 +609,5 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     ledger = open_ledger(db)
     assert ReplayLog(ledger).all() == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
     conn.close()
