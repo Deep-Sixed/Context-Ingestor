@@ -128,7 +128,14 @@ class TestChain:
         log.close()
         bodies = [e.body for e in EventLog(ledger).for_subject(dispatch_id)
                   if e.kind == "delivery.event"]
-        assert [(b["event"], b["done"]) for b in bodies] == [("intent", None), ("failure", None)]
+        # The failure wrote nothing under its own attempt; the intent's attempt
+        # stays open (the chain commits to both attempt ids).
+        assert [(b["event"], b["done"]) for b in bodies] == [("intent", None), ("failure", 0)]
+        assert bodies[0]["attempt_id"] and bodies[1]["attempt_id"]
+        assert bodies[0]["attempt_id"] != bodies[1]["attempt_id"]
+        log = DeliveryLog(ledger)
+        assert log.get(dispatch_id).possibly_written
+        log.close()
         assert verify_ledger(ledger).ok
 
     def test_chain_links_and_verifies(self, ledger, tmp_path) -> None:
@@ -254,6 +261,27 @@ class TestTampering:
         )
         assert "record forged is in the ledger but was never logged" in verify_ledger(ledger).problems
 
+    def test_event_body_that_is_not_json_is_reported(self, ledger, tmp_path) -> None:
+        """A tampered body is a finding, never a crash of the verification."""
+        _lifecycle(ledger, tmp_path)
+        _raw(ledger).execute("UPDATE events SET body='not json' WHERE seq=1")
+        report = verify_ledger(ledger)
+        assert any("event 1 " in p and "was altered" in p for p in report.chain.problems)
+        assert any(p.startswith("event 1 ") and "malformed body" in p for p in report.problems)
+
+    def test_record_columns_that_are_not_json_are_reported(self, ledger, tmp_path) -> None:
+        ids = _lifecycle(ledger, tmp_path)
+        sqlite3.connect(ledger.db_path, isolation_level=None).execute(
+            "UPDATE artifact_records SET parser_config='{' WHERE record_id=?", (ids["sealed"],),
+        )
+        sqlite3.connect(ledger.db_path, isolation_level=None).execute(
+            "UPDATE artifact_records SET artifact_manifest='[1, 2]' WHERE record_id=?",
+            (ids["withdrawn"],),
+        )
+        problems = verify_ledger(ledger).problems
+        assert any(p.startswith(f"record {ids['sealed']} ") and "malformed" in p for p in problems)
+        assert any(p.startswith(f"record {ids['withdrawn']} ") and "malformed" in p for p in problems)
+
     def test_delivery_and_replay_rows_changed(self, ledger, tmp_path) -> None:
         ids = _lifecycle(ledger, tmp_path)
         conn = _raw(ledger)
@@ -301,6 +329,7 @@ def test_migration_logs_existing_state(tmp_path: Path) -> None:
 
     conn = _raw(ledger)
     conn.execute("DROP TABLE events")
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added in v8
     conn.execute("PRAGMA user_version = 6")  # v6: payload binding (#35), no event log yet
     conn.close()
 
@@ -320,7 +349,7 @@ def test_migration_logs_existing_state(tmp_path: Path) -> None:
     migrated.invalidate(ids["sealed"], "later")
     assert verify_ledger(migrated).ok
     c = sqlite3.connect(db)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     c.close()
 
 

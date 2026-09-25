@@ -164,6 +164,7 @@ Details and known limits: [docs/containment.md](docs/containment.md).
 | [Adapter contract](docs/adapter.md) | `SteleAdapter`, `TargetWriter`, the Dispatcher and delivery log, the ChatGPT export adapter |
 | [Production verification](docs/verification.md) | Corpus manifests, campaigns, the gated report, sign-off |
 | [Extraction contract](docs/extraction.md) | `stele.extraction` v1, normalizers, the trusted resolver, `ExtractionAdapter` |
+| [Identity contract](docs/identity.md) | `stele:` references to sources, snapshots, records, observations, anchors and events, and how they resolve |
 | [Evidence store](docs/archive.md) | Content-addressed Snapshot and artifact archive |
 | [Cloud sandboxes](docs/cloud-sandboxes.md) | Design note for hosted sandbox backends (not implemented) |
 | [Parser images](parsers/README.md) | Building and running MinerU, Marker, Docling |

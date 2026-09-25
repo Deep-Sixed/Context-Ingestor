@@ -6,8 +6,10 @@ The bundle is normalized by the trusted normalizer for its parser
 verified bytes by the resolver before anything is returned, so a normalizer
 bug that misquotes the evidence fails the transform instead of reaching a
 target. Chunk ids are "<record_id>:<unit id>"; metadata carries the unit's
-kind, order, page, bbox, level, parent, anchor and attributes, plus the
-extraction's schema and normalizer.
+kind, order, page, bbox, level, parent, anchor and attributes, the
+extraction's schema and normalizer, and stele_anchor: the unit's anchor as a
+Stele reference (stele.identity), which a consumer can resolve to check a
+citation against the evidence.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ class ExtractionAdapter:
         # Imported here: the normalizers build on the other adapters in this package.
         from ..extraction.normalizers import normalize
         from ..extraction.resolver import BundleResolver, ResolutionError
+        from ..identity.refs import anchor_ref
 
         extraction = normalize(bundle)
         problems = BundleResolver(bundle).verify(extraction)
@@ -45,6 +48,7 @@ class ExtractionAdapter:
                 level=unit.level,
                 parent=f"{bundle.record_id}:{unit.parent}" if unit.parent else None,
                 anchor=unit.anchor.to_json(),
+                stele_anchor=str(anchor_ref(extraction, unit)),
                 attributes=dict(unit.attributes),
             )
             for unit in extraction.units

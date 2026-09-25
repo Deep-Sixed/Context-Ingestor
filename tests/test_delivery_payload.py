@@ -145,7 +145,10 @@ def test_adapter_failure_after_an_outstanding_intent_does_not_claim_nothing_was_
     assert result.status == "failed"
     [delivery] = _dispatcher(ledger, target).dispatch_log_for(record.record_id)
     # Another attempt's write may have landed; this failure must not hide it.
-    assert delivery.events[-1].event == "failure" and delivery.events[-1].done is None
+    # It reports only its own attempt, which wrote nothing.
+    last = delivery.events[-1]
+    assert last.event == "failure" and last.done == 0
+    assert last.attempt_id not in {e.attempt_id for e in delivery.events[:-1]}
     assert delivery.possibly_written
 
 
@@ -292,6 +295,7 @@ def test_version_5_ledger_gains_payload_binding(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(db)
     conn.execute("DROP TRIGGER delivery_events_one_payload")
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added by version 8
     conn.execute("DROP TABLE events")  # the event log arrives in v7
     conn.execute("DROP TABLE replays")
     for statement in REPLAY_DDL:  # the v5 replay log, without 'failed'
@@ -307,7 +311,7 @@ def test_version_5_ledger_gains_payload_binding(tmp_path: Path) -> None:
 
     ledger = open_ledger(db)
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     assert conn.execute("SELECT outcome, reason FROM replays").fetchall() == [("diverged", "old")]
     conn.execute(
         "INSERT INTO replays (replay_id, record_id, outcome, reason, differences, platform, "

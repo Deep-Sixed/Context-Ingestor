@@ -188,7 +188,9 @@ class TestFormat:
         doc = {"mapping": {"a/b~c": {"message": "hit"}}, "list": [10, 11]}
         assert resolve_pointer(doc, pointer) == "hit"
         assert resolve_pointer(doc, "/list/1") == 11
-        for bad in ("/list/01", "/list/2", "/list/x", "/mapping/nope", "/list/0/deeper"):
+        # "²" and "١" pass str.isdigit(); RFC 6901 allows only ASCII digits.
+        for bad in ("/list/01", "/list/2", "/list/x", "/mapping/nope", "/list/0/deeper",
+                    "/list/²", "/list/١"):
             with pytest.raises(ResolutionError):
                 resolve_pointer(doc, bad)
 

@@ -30,8 +30,9 @@ from .models import ArtifactRecord, ArtifactState, ParserIdentity, RunConditions
 # empty database), 2 has records only, 3 adds the delivery log (#13), 4 the
 # replay log (#14), 5 the run conditions column (#30), 6 binds each delivery
 # to one payload and adds the FAILED replay outcome, 7 the hash-chained event
-# log; see stele/ledger/migration.py.
-SCHEMA_VERSION = 7
+# log, 8 gives delivery events the write attempt they belong to; see
+# stele/ledger/migration.py.
+SCHEMA_VERSION = 8
 
 _DDL = (
     """
@@ -294,6 +295,15 @@ V6_DDL = (
 )
 
 
+# Version 7 → 8: each intent, receipt and failure names its write attempt,
+# so overlapping attempts on one delivery are told apart (see
+# Delivery.possibly_written). Existing events keep NULL and are read as
+# before, one attempt at a time.
+V8_DDL = (
+    "ALTER TABLE delivery_events ADD COLUMN attempt_id TEXT",
+)
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     """A connection to a ledger database.
 
@@ -310,7 +320,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create the current schema. The caller holds the write transaction."""
-    for statement in (*_DDL, *DELIVERY_DDL, *REPLAY_DDL, *V6_DDL, *EVENTS_DDL):
+    for statement in (*_DDL, *DELIVERY_DDL, *REPLAY_DDL, *V6_DDL, *EVENTS_DDL, *V8_DDL):
         conn.execute(statement)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
