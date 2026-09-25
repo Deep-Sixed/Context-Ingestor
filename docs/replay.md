@@ -66,18 +66,21 @@ The sealed bundle in the archive is unaffected by working-copy drift.
 
 ### Outcomes
 
-Four named outcomes, never merged into each other:
+Five named outcomes, never merged into each other:
 
 | Outcome | Meaning |
 |---|---|
 | `REPRODUCED` | Byte-identical output from a deterministic replay. Only parsers whose spec requires a `DETERMINISTIC` backend (Wasm, #7) can produce it. |
 | `EQUIVALENT` | Accepted under the parser's comparison policy. **Not** proof of reproduction, and never reported as `REPRODUCED`, even when the bytes happen to match. |
-| `DIVERGED` | Outside policy. For a parser without a policy, any byte difference. A replay run that fails is also `DIVERGED`. |
+| `DIVERGED` | The replay produced complete output and it is outside policy. For a parser without a policy, any byte difference. |
 | `UNREPLAYABLE` | The parser cannot be run as recorded: no parser identity (a migrated pre-#12 record), no spec in the catalog, a missing or different Wasm module or image, a missing input Snapshot, a record the spec cannot build a run from (e.g. no original file name for a parser that reads by suffix), no capable backend, or a non-deterministic parser with no comparison policy. |
+| `FAILED` | The parser was run as recorded, but the run did not complete (non-zero exit, timeout, resource limit, crash), so no output was compared. It says nothing about the sealed evidence: replay again. |
 
 `DIVERGED` feeds invalidation: `invalidate_diverged(dispatcher, results)`
 invalidates each diverged record through the Dispatcher, which also removes
-what it delivered (#13), with the reason `replay_diverged`.
+what it delivered (#13), with the reason `replay_diverged`. Only `DIVERGED`
+is a completed comparison that found a difference, so `FAILED` and
+`UNREPLAYABLE` replays never invalidate anything.
 
 ### Comparison policies (`stele/replay/policy.py`)
 
@@ -87,7 +90,7 @@ and Docling, #9/#10) carries an explicit `ComparisonPolicy` in its
 parameters) is written to the replay log with every verdict.
 
 - A deterministic parser without a policy can only ever be `REPRODUCED`,
-  `DIVERGED` or `UNREPLAYABLE`.
+  `DIVERGED`, `UNREPLAYABLE` or `FAILED`.
 - A non-deterministic parser without a policy is always `UNREPLAYABLE`:
   nothing defines what agreement means for it.
 

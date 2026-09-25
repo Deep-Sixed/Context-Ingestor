@@ -400,10 +400,12 @@ class BlobStore:
     # -- metadata records ---------------------------------------------------
 
     def put_snapshot(self, snapshot: Snapshot) -> Snapshot:
-        """Record a Snapshot once all of its blobs are stored.
+        """Record a Snapshot once all of its blobs are stored and verified.
 
-        The record is published last, so its presence means the snapshot's
-        content is complete in the store. Recording it again is a no-op.
+        Every blob the snapshot covers (the file, or the tree object and each
+        file it lists) is re-hashed first, and the record is published last,
+        so its presence means the snapshot's content was complete and intact
+        in the store when it was recorded. Recording it again is a no-op.
         """
         self._check_snapshot_content(snapshot)
         final = self._sharded(self._snapshots / snapshot.kind.value, snapshot.digest)
@@ -427,14 +429,22 @@ class BlobStore:
         return self._sharded(self._snapshots / kind.value, _check_digest(digest)).is_file()
 
     def _check_snapshot_content(self, snapshot: Snapshot) -> None:
+        """Re-hash every blob the snapshot covers; a size match is not enough."""
         if snapshot.kind is SnapshotKind.FILE:
-            if self.size(snapshot.digest) != snapshot.size:
+            if self._verified_size(snapshot.digest) != snapshot.size:
                 raise IntegrityError(f"snapshot {snapshot.digest} size does not match its blob")
             return
         tree = self.read_tree(snapshot.digest)
-        total = sum(self.size(d) for d in tree.values())
+        total = sum(self._verified_size(d) for d in tree.values())
         if (total, len(tree)) != (snapshot.size, snapshot.file_count):
             raise IntegrityError(f"snapshot {snapshot.digest} totals do not match its tree")
+
+    def _verified_size(self, digest: str) -> int:
+        """Size of a blob whose bytes were just verified against digest."""
+        size = 0
+        for chunk in self.iter_verified(digest):
+            size += len(chunk)
+        return size
 
     def put_source(self, source: Source) -> str:
         """Record a Source; return its source_id."""

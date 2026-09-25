@@ -27,6 +27,7 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Sequence
 
 from . import landlock, seccomp
@@ -95,6 +96,19 @@ class UnsupportedBackendError(RuntimeError):
 
 class SandboxUnavailableError(UnsupportedBackendError):
     """The sandbox backend needed for this run cannot run on this host."""
+
+
+class ContainmentCleanupError(RuntimeError):
+    """A stopped run's sandbox could not be proven gone.
+
+    The parser may still be running, with its output directory mounted
+    writable. Nothing in that directory may be treated as the run's output:
+    the run is not reported as finished, so nothing is collected or sealed.
+    """
+
+    def __init__(self, message: str, *, artifact_dir: Path | None = None) -> None:
+        super().__init__(message)
+        self.artifact_dir = artifact_dir
 
 
 BWRAP_MISSING = (
