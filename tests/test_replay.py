@@ -1,5 +1,5 @@
 """
-Phase G replay proof tests.
+Replay and invalidation proof tests.
 
 Seven required proofs:
 
@@ -12,8 +12,7 @@ Seven required proofs:
   PASS 7 — Explicit include_invalidated mode works for audit
 
 Run:
-    cd EVECOR/services/stele
-    uv run pytest tests/test_phase_g_replay.py -v
+    uv run pytest tests/test_replay.py -v
 """
 from __future__ import annotations
 

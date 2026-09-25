@@ -1,129 +1,165 @@
 # Stele — Parser Containment & Artifact Ledger
 
-**Status:** COMPLETE — v1.0 milestone (extracted 2026-06-26)  
-**Canonical repo:** `/mnt/jarvis-data/projects/Stele`  
-**Created:** 2026-06-26
+Stele runs untrusted document parsers in a sandbox and keeps a verifiable
+record of everything they produce, so parser output reaches your downstream
+stores only through one audited path.
 
-## Extraction note
+Document parsers (PDF, Office, OCR, ML layout models) are large, fast-moving
+codebases that handle hostile input. Stele treats every parser as untrusted:
 
-This is the **standalone canonical home** for Stele v1.0.
-
-**EVECOR continues to use its embedded copy** at `EVECOR/services/stele/` until
-an explicit cutover. Do not develop two independent copies — changes land here
-first after cutover; until then, production fixes may still go to the EVECOR
-embedded path and be synced here at milestone boundaries.
-
-## Purpose
-
-Stele is the parser containment boundary and deterministic artifact ledger
-that sits between untrusted parser execution (RAG-ANYTHING, MinerU, Marker)
-and production write targets (Hindsight, Graphify/LightRAG, MetaRouter artifacts).
-
-No parser-facing infrastructure may write to production except through the
-Stele adapter contract (Phase H) and the Dispatcher write path.
-
-## Milestone baseline (v1.0)
-
-| Item | Status |
-|------|--------|
-| Phase E — containment | ✅ 23 tests |
-| Phase F — ledger | ✅ 27 tests |
-| Phase G — replay / invalidation | ✅ 24 tests |
-| Phase H — adapter contract | ✅ 25 tests |
-| Live ingestion (EVECOR RAG path) | ✅ proven |
-| Scoped tombstones (`{run_id}:` prefix) | ✅ implemented in EVECOR RAG integration |
-
-**99 Stele tests** in this repo. RAG×Stele integration tests (31) remain in
-`EVECOR/DataCore/RAG/` until adapters move with cutover.
-
-**Ledger redesign (#12), after v1.0:** records are per run, and a record is
-`sealed` once its bundle is stored in the evidence archive and verified.
-Sealed is not delivered, which replaces v1.0's `committed`. Each record
-stores its input Snapshot digest and its parser identity and config. The
-ledger API changed accordingly (`LedgerStore(db, archive)`, `seal()`,
-`record_run()`). Existing ledgers migrate on open. See `docs/F-ledger.md`.
-
-**Durable dispatch (#13):** the Dispatcher delivers only sealed records and
-checks this against the live ledger. Adapters read verified bytes from the
-archive (`SealedBundle`), never files. Each write has a durable intent and a
-receipt or failure in an append-only delivery log. Writers get a `dispatch_id`
-idempotency key. `Dispatcher.invalidate()` removes a record's delivered data
-and records a receipt for each removal. See `docs/H-adapter.md`.
-
-**Replay (#14):** replay re-runs a record's parser at its recorded identity,
-with its recorded config, on its recorded input Snapshot. Each replay is
-reported as exactly one of `REPRODUCED`, `EQUIVALENT` (under the parser's
-comparison policy), `DIVERGED` or `UNREPLAYABLE`, and logged. Validation (the
-re-hash of working copies) is a separate operation. A frozen-Snapshot harness
-proves the Wasm extractor reproduces byte for byte on Linux, macOS and
-Windows. See `docs/G-replay.md`.
-
-**Run telemetry and faults (#11):** every run result carries the same
-telemetry from every backend: wall and CPU time, peak memory, exit status,
-the limits applied, and the backend and runtime that ran it. A measurement a
-backend can't make is `None`. A failed run carries one structured reason:
-timeout, out of memory, CPU limit, blocked syscall, Wasm trap, crash, exit
-status, engine error or unsafe output. A failed or killed run leaves no
-output, staging copy, process or container behind. See `docs/E-containment.md`.
-
-**ChatGPT export adapter:** `stele.adapters.ChatGPTExportAdapter` turns the
-Wasm splitter's sealed output into one chunk per message on every conversation
-branch, not only the branch the UI showed. It reads one conversation at a time
-from the archive. Parent links and branch metadata let a target rebuild each
-branch. See `docs/H-adapter.md`.
-
-## Gate
-
-**RAG-ANYTHING: PROCEED — Stele-gated ingestion with scoped tombstone support.**
+- **Contain the parser.** Each run gets a staged read-only copy of its input,
+  no network, and exactly one writable directory. It runs in bubblewrap, an
+  OCI container (Podman/Docker, optionally gVisor or GPU), or a
+  WebAssembly/WASI runtime.
+- **Record what it produced.** Every run gets its own ledger record: the
+  digest of the exact input the parser read, the parser's identity (name,
+  version, image or module digest) and config, and a manifest of its output.
+  A record is `sealed` once its whole bundle is stored in the evidence archive
+  and verified.
+- **Keep evidence.** A content-addressed archive holds the input bytes the
+  parser saw and every artifact it produced. Nothing in it is overwritten, and
+  every read re-hashes the bytes.
+- **Replay and invalidate.** A sealed run can be re-checked against the
+  archive, or replayed by running the recorded parser on the recorded input
+  again. Each replay is reported as `REPRODUCED`, `EQUIVALENT`, `DIVERGED` or
+  `UNREPLAYABLE`. Invalidating a run withdraws it and removes what it
+  delivered, without rewriting history.
+- **Write through one door.** Adapters turn a sealed bundle into typed,
+  hash-checked chunks. Only the Dispatcher, using writers you register, sends
+  them to target stores. It logs an intent before each write and a receipt or
+  failure after it, so a crash never leaves you guessing what a target holds.
+- **Report every run the same way.** Each run result carries the same
+  telemetry from every backend: wall and CPU time, peak memory, exit status,
+  the limits applied, and the backend and runtime. A failed run carries one
+  structured reason (timeout, out of memory, CPU limit, blocked syscall, Wasm
+  trap, crash, exit status, engine error, unsafe output) and leaves no output,
+  staging copy, process or container behind.
+- **Ingest ChatGPT exports whole.** A Wasm extractor splits `conversations.json`
+  byte for byte, and `ChatGPTExportAdapter` turns the sealed result into one
+  chunk per message on every conversation branch (edits and regenerations
+  included), reading one conversation at a time.
 
 ```
-source → bubblewrap parser → ledger → SteleAdapter → Dispatcher → TargetWriter → target store
+source ─▶ staging ─▶ sandboxed parser ─▶ /stele/output ─▶ ledger (pending)
+                                                              │ archive + verify
+                                                              ▼
+ target store ◀─ TargetWriter ◀─ Dispatcher ◀─ Adapter ◀─ ledger (sealed)
+                                     │
+                                     └─▶ delivery log (intent → receipt)
 ```
 
-Integration adapters (e.g. `RagAnythingSteleAdapter`, `LightRAGTargetWriter`,
-`lightrag_tombstone`) live in EVECOR until extracted alongside cutover.
+## Quick start
 
-**Caveat:** KG entity/relation enrichment requires valid `LITELLM_RAG_ANYTHING_KEY`.
-
-See `docs/` for per-phase specs.  
-Adapter and dispatcher protocols: `stele/contracts/`.
-
-## Design sign-off
-
-```
-Parser → SteleAdapter → Dispatcher → TargetWriter → Hindsight / LightRAG / …
-```
-
-RAG-ANYTHING transforms only; the Dispatcher owns target writes; tombstone
-cleanup is scoped to Stele-marked chunk rows and does not mutate the artifact
-ledger.
-
----
-
-## Directory layout
-
-```
-Stele/
-├── README.md
-├── docs/                   ← phase specs (E–H), evidence store (archive.md), cloud sandbox design note
-├── stele/                  ← Python package
-│   ├── containment/
-│   ├── archive/            ← content-addressed evidence store (#16)
-│   ├── extractors/         ← Wasm extractors (run on the Wasmtime backend)
-│   ├── parsers/            ← packaged ML parsers in pinned images (#9, #10)
-│   ├── ledger/
-│   ├── replay/
-│   └── contracts/
-├── parsers/                ← parser image build files (MinerU, Marker, Docling)
-├── tests/
-├── pyproject.toml
-└── uv.lock
-```
-
-## Develop
+Requirements: Python 3.12+. You also need at least one sandbox backend:
+`bubblewrap` (Linux), Podman or Docker, or the `wasm` extra, which runs
+anywhere.
 
 ```bash
-cd /mnt/jarvis-data/projects/Stele
 uv sync --extra dev
 uv run pytest tests/ -v
+```
+
+Run a parser script in the sandbox from the command line:
+
+```bash
+python -m stele.containment.runner \
+    --input paper.pdf --script my_parser.py --artifact-dir out/ \
+    -- /usr/bin/python3 /stele/parser
+```
+
+Inside the sandbox the parser reads `$STELE_INPUT_PATH` and writes only to
+`$STELE_OUTPUT_DIR` (`/stele/output`).
+
+Or from Python, from sandbox run to sealed record to target:
+
+```python
+from pathlib import Path
+
+from stele.archive.records import Source
+from stele.archive.store import BlobStore
+from stele.containment.runner import run_in_sandbox
+from stele.containment.sandbox import SandboxConfig
+from stele.contracts.dispatcher import Dispatcher
+from stele.ledger.models import ParserIdentity
+from stele.ledger.store import LedgerStore
+from stele.ledger.transaction import record_run
+
+archive = BlobStore(Path("archive"))
+ledger = LedgerStore(Path("ledger.db"), archive)
+
+result = run_in_sandbox(SandboxConfig(
+    command=["/usr/bin/python3", "/stele/parser"],
+    script_path=Path("my_parser.py"),
+    input_path=Path("paper.pdf"),
+    artifact_dir=Path("out"),
+), store=archive)                      # archives the input Snapshot and artifacts
+
+record = record_run(                   # PENDING -> SEALED, or FAILED
+    ledger, result,
+    parser=ParserIdentity("my_parser", "1.0"),
+    parser_config={},
+    source=Source.from_path("paper.pdf"),
+)
+
+dispatcher = Dispatcher(ledger)
+dispatcher.register_target(MyTarget, my_writer)          # your TargetWriter
+dispatcher.dispatch(my_adapter, record.record_id, MyTarget("docs"))
+
+# Later, if the run should no longer count:
+dispatcher.invalidate(record.record_id, "source_changed")  # removes delivered data
+```
+
+### Packaged parsers
+
+MinerU, Marker and Docling run in pinned container images with their model
+weights built in. Parsing never uses the network:
+
+```bash
+python -m stele.parsers build-command mineru   # prints the image build command
+python -m stele.parsers run mineru --input paper.pdf --artifact-dir out/
+```
+
+See [parsers/README.md](parsers/README.md).
+
+## What Stele guarantees and what it doesn't
+
+| Guarantee | Scope |
+|-----------|-------|
+| No network for parsers | Every backend. Parsers cannot request it. |
+| No writes outside `/stele/output` | Enforced by mount layout; also by Landlock where the kernel has it |
+| Syscall denylist (seccomp) | bubblewrap on x86_64/aarch64; OCI when the engine's profile is active; gVisor |
+| No unsandboxed fallback | A run with no capable backend is refused before anything executes |
+| Tamper-evident artifacts | Hashes are computed on the host from no-follow opens, and archived bytes are re-verified on every read, seal, dispatch and replay |
+| Only sealed records are delivered | The Dispatcher checks the live ledger before every write |
+| Adapter isolation | **Contract only.** Adapters run in-process as trusted code. Only parsers are sandboxed. |
+
+Details and known limits: [docs/containment.md](docs/containment.md).
+
+## Documentation
+
+| Doc | Covers |
+|-----|--------|
+| [Containment](docs/containment.md) | Sandbox backends, seccomp, Landlock, OCI and Wasm details, run telemetry and failure reasons |
+| [Ledger](docs/ledger.md) | State machine, record fields, parser identity, migration |
+| [Replay](docs/replay.md) | Validation, replay outcomes, invalidation, ledger views |
+| [Adapter contract](docs/adapter.md) | `SteleAdapter`, `TargetWriter`, the Dispatcher and delivery log, the ChatGPT export adapter |
+| [Evidence store](docs/archive.md) | Content-addressed Snapshot and artifact archive |
+| [Cloud sandboxes](docs/cloud-sandboxes.md) | Design note for hosted sandbox backends (not implemented) |
+| [Parser images](parsers/README.md) | Building and running MinerU, Marker, Docling |
+
+## Layout
+
+```
+stele/
+├── containment/   sandbox backends (bubblewrap, OCI, Wasmtime), staging, seccomp, Landlock
+├── archive/       content-addressed evidence store
+├── ledger/        artifact ledger and delivery log (SQLite, WAL)
+├── replay/        validation, replay engine, invalidation, views
+├── contracts/     adapter, dispatcher and target-writer protocols
+├── adapters/      adapters (ChatGPT export: every branch, streamed)
+├── extractors/    deterministic Wasm extractors
+└── parsers/       packaged ML parsers in pinned images
+parsers/           parser image build files (MinerU, Marker, Docling)
+docs/              design docs
+tests/
 ```

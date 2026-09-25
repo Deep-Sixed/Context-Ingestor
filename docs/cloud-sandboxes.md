@@ -1,6 +1,5 @@
 # Cloud sandboxes as a Stele backend (design note)
 
-**Status:** design note — not implemented. Candidate follow-up to roadmap
 #5–#8 (see the tracking issue, #15).
 
 Stele runs every parser through a `SandboxBackend`
@@ -102,5 +101,5 @@ the artifact directory or forge the ledger's hashes.
   (`pip install stele[cloud]`) so the core stays dependency-free.
 - Register it after the local backends in `default_backends()`, and only when
   credentials are configured, so local isolation stays the default.
-- Reuse the shared containment proofs in `tests/test_phase_e_containment.py`,
+- Reuse the shared containment proofs in `tests/test_containment.py`,
   run live in CI only where provider credentials are available.

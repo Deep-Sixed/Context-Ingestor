@@ -1,5 +1,5 @@
 """
-Stele Phase G — validation planner.
+Stele replay — validation planner.
 
 Validation re-hashes the working copies of sealed artifacts and reports which
 are intact and which have drifted or gone missing. It never runs a parser.

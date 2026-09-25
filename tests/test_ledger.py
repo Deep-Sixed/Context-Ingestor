@@ -1,5 +1,5 @@
 """
-Phase F ledger proof tests.
+Ledger proof tests.
 
 Six required proofs:
 
@@ -14,8 +14,7 @@ Provenance (input Snapshot, parser identity) and migration are proved in
 tests/test_ledger_provenance.py.
 
 Run:
-    cd EVECOR/services/stele
-    uv run pytest tests/test_phase_f_ledger.py -v
+    uv run pytest tests/test_ledger.py -v
 """
 from __future__ import annotations
 

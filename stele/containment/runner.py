@@ -1,5 +1,5 @@
 """
-Stele Phase E — sandboxed parser runner.
+Stele containment — sandboxed parser runner.
 
 Usage as a library:
     from stele.containment.runner import run_in_sandbox

@@ -93,7 +93,7 @@ records a successful run under the parser's name, version, measured image
 digest and merged configuration. The Source is required: the parsers choose
 their reader by the file suffix, and the replay must give the document its
 original name. `replay_spec(parser)` lets the replay engine
-(`docs/G-replay.md`) run it again on the recorded document. ML parsers are not
+(`docs/replay.md`) run it again on the recorded document. ML parsers are not
 deterministic, so a replay is judged by the parser's `comparison` policy:
 `EQUIVALENT` or `DIVERGED`, never `REPRODUCED`. It is `UNREPLAYABLE` when the
 image is not present locally or no longer has the recorded digest.
@@ -133,5 +133,5 @@ The `parser-images` workflow builds each image and runs
 `tests/test_parser_images.py` (representative documents parse end to end,
 output layout, identity, a missing model fails cleanly with status 3, the
 memory and time limits end runs cleanly with nothing kept) and the
-Phase E containment proofs against the image (`STELE_PROOF_IMAGES`).
+containment proofs against the image (`STELE_PROOF_IMAGES`).
 The fixtures come from `tests/fixtures/documents/make_fixtures.py`.

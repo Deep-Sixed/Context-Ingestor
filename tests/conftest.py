@@ -1,6 +1,6 @@
 """Shared fixtures.
 
-containment_backend parametrizes the Phase E containment proofs over every
+containment_backend parametrizes the containment proofs over every
 registered sandbox backend that hosts processes (roadmap #5), so each new
 process backend must pass the same proofs. The OCI backend (roadmap #8) is also
 proved explicitly on Docker (the default prefers Podman) and with the opt-in
@@ -15,7 +15,7 @@ sandbox_python is the interpreter command for the chosen backend: bubblewrap
 exposes the host /usr, so it is the host interpreter; a container runs its
 image's own python3.
 
-The Phase E proofs run Python scripts, which only process backends can host.
+The containment proofs run Python scripts, which only process backends can host.
 Wasm backends prove the same guarantees with Wasm probe modules in
 tests/test_wasm_backend.py (wasm_backend fixture).
 """
