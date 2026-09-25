@@ -121,6 +121,11 @@ dispatcher.dispatch(my_adapter, record.record_id, MyTarget("docs"))
 dispatcher.invalidate(record.record_id, "source_changed")  # removes delivered data
 ```
 
+Artifacts made outside a Stele sandbox (for example a document an application
+has validated) are recorded with `stele.ledger.external.record_external_artifact`.
+They are archived and sealed the same way, marked `backend="external"`, and
+never replayed. See [docs/ledger.md](docs/ledger.md#recording-an-artifact-made-outside-a-sandbox).
+
 ### Packaged parsers
 
 MinerU, Marker and Docling run in pinned container images with their model

@@ -18,7 +18,7 @@ Every replay has exactly one of five outcomes, never merged into each other:
   DIVERGED      outside policy (or, without a policy, any byte difference).
                 Feeds invalidation: invalidate_diverged().
   UNREPLAYABLE  the parser cannot be run as recorded: no parser identity or
-                spec, a missing or different Wasm module or image, a missing
+                spec, a record made outside a Stele sandbox, a missing or different Wasm module or image, a missing
                 input Snapshot, no capable backend, or a non-deterministic
                 parser without a comparison policy.
   FAILED        the parser was run as recorded but the run did not complete
@@ -48,7 +48,7 @@ from ..archive import ArchiveError, materialize_snapshot
 from ..archive.records import canonical_json
 from ..containment.backend import UnsupportedBackendError
 from ..containment.wasm import wasm_module_sha256
-from ..ledger.models import ArtifactRecord, ArtifactState
+from ..ledger.models import EXTERNAL_BACKEND, ArtifactRecord, ArtifactState
 from ..ledger.events import append_event, write_transaction
 from ..ledger.store import LedgerStore, connect
 from .models import InvalidationReason
@@ -222,6 +222,11 @@ class _Replay:
         parser = self.record.parser
         if parser is None:
             raise _Unreplayable("the record has no parser identity (migrated from a pre-#12 ledger)")
+        if self.record.backend == EXTERNAL_BACKEND:
+            raise _Unreplayable(
+                f"recorded outside a Stele sandbox (producer {parser.name} {parser.version}); "
+                "there is no parser run to repeat"
+            )
         spec = self.catalog.get(parser.name, parser.version)
         if spec is None:
             raise _Unreplayable(f"parser {parser.name} {parser.version} is not in the catalog")

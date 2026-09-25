@@ -69,7 +69,7 @@ A second record for the same `run_id` raises `DuplicateRunError`.
 | `source_path`, `source_id` | The descriptive **Source** of that input (a locator) and its id in the archive. Descriptive only, never evidence. |
 | `parser` | `ParserIdentity`: `name`, `version`, and the executable's digest: `image_digest` (OCI backend) or `module_sha256` (Wasm backends). The digests are measured by the run, not asserted by the caller. |
 | `parser_config` | The configuration passed to the parser, stored as canonical JSON |
-| `backend` | Sandbox backend that ran the parser |
+| `backend` | Sandbox backend that ran the parser, or `external` for an artifact recorded outside a sandbox |
 | `run_conditions` | `RunConditions`: the `device` (`cpu` or `gpu`) and the `memory`, `cpus`, `pids_limit` and `timeout_seconds` the run executed under. Recorded by Stele's runner (`record_parser_run`), so a replay runs the parser the same way (#30). `None` for runs recorded without them and for records made before schema version 5. |
 | `artifact_dir` | Host path of the run's output directory (a location, not evidence) |
 | `artifact_manifest` | `{relative POSIX path: sha256}` for every artifact |
@@ -115,6 +115,47 @@ Before creating the record, the transaction refuses:
 
 If the bundle on disk no longer matches what the run archived, the record is
 created and immediately marked `failed`.
+
+## Recording an artifact made outside a sandbox
+
+Some evidence is produced by an application rather than a sandboxed parser,
+for example a document it validated and wants kept (AgentSync's promoted
+`SKILL.md` files). `record_external_artifact` is the supported way to ledger
+it. Callers should not drive `create_pending` / `seal` themselves.
+
+```python
+from stele.ledger.external import record_external_artifact
+
+record = record_external_artifact(
+    ledger,
+    run_id=run_id,                                   # the caller's UUID
+    artifact_dir=out_dir,
+    artifact_paths=[out_dir / "SKILL.md"],
+    producer=ParserIdentity("agentsync-kanon", "0.1.0"),
+    producer_config={"validation_level": "promote"},
+    input_snapshot=None,                             # or an archived Snapshot
+)
+assert record.state is ArtifactState.SEALED
+```
+
+- **Same integrity.** The bundle is hashed, archived and verified as for a
+  sandbox run, so `sealed` means the same thing.
+- **Asserted, not measured, provenance.** The producer is whatever the caller
+  says. Such records have `backend = "external"` (`EXTERNAL_BACKEND`), a
+  name no sandbox backend uses; `ledger_transaction` refuses a run that
+  claims it. The producer can't carry `image_digest` or `module_sha256`,
+  since those are measured by a sandbox run (`ProvenanceError`).
+- **Never replayed.** There is no parser run to repeat, so replay reports
+  these records `UNREPLAYABLE` and never invalidates them.
+- **Input is optional.** An `input_snapshot` must already be in the ledger's
+  archive (`ProvenanceError` otherwise).
+- **`run_id` is the idempotency key.** Calling again for a recorded `run_id`
+  with the same bundle, producer, config and input returns the sealed
+  record, or seals a record an earlier call left `pending`. Anything else
+  for that `run_id`, including a record that is `failed`, raises
+  `DuplicateRunError`: record it under a new `run_id`.
+- If sealing fails, the record is marked `failed` and the error propagates,
+  as with `ledger_transaction`.
 
 ## Sealing
 
@@ -212,12 +253,14 @@ if there is any problem.
 - `stele/ledger/hashing.py` — `sha256_file`, `sha256_manifest`, `build_manifest`
 - `stele/ledger/store.py` — `LedgerStore` (SQLite, WAL mode)
 - `stele/ledger/transaction.py` — `ledger_transaction`, `record_run`
+- `stele/ledger/external.py` — `record_external_artifact` for artifacts made outside a sandbox
 - `stele/ledger/migration.py` — migration from schema versions 0, 2, 3, 4, 5, 6 and 7
 - `stele/ledger/events.py` — the hash-chained event log, `verify_ledger`, CLI
 - `stele/ledger/delivery.py` — the delivery log (#13)
 - `tests/test_ledger.py` — state machine, hashing, per-run records
 - `tests/test_ledger_provenance.py` — Snapshot provenance, parser identity, sealing, migration
 - `tests/test_event_log.py` — chaining, verification, tamper detection, anchors, migration, CLI
+- `tests/test_external_artifacts.py` — external records: sealing, retries, provenance guards, replay
 
 ## Completion criteria
 

@@ -38,7 +38,9 @@ from typing import Any, Generator, Mapping
 
 from ..archive.records import Source
 from ..containment.result import SandboxResult
-from .models import ArtifactRecord, ArtifactState, ParserIdentity, RunConditions
+from .models import (
+    EXTERNAL_BACKEND, ArtifactRecord, ArtifactState, ParserIdentity, RunConditions,
+)
 from .store import LedgerStore, ProvenanceError
 
 
@@ -129,6 +131,11 @@ def ledger_transaction(
             "nothing to ledger"
         )
 
+    if sandbox_result.backend == EXTERNAL_BACKEND:
+        raise ProvenanceError(
+            f"backend {EXTERNAL_BACKEND!r} is reserved for artifacts recorded with "
+            "stele.ledger.external.record_external_artifact"
+        )
     _check_input(sandbox_result)
     identity = measured_parser_identity(parser, sandbox_result)
 
