@@ -218,7 +218,6 @@ class BlobStore:
         on_exists(final) verifies an existing object and raises if it
         conflicts. tmp is always gone when this returns or raises.
         """
-        moved = False
         try:
             shard = final.parent
             if not shard.is_dir():
@@ -229,22 +228,27 @@ class BlobStore:
                 return
             # Blobs and records are read-only once published.
             os.chmod(tmp, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            # Publish with a hard link, which fails if final exists: two
+            # writers that both passed the check above must not both rename
+            # into place, or the second would swap the inode under a reader
+            # that is already verifying the first.
             try:
-                os.replace(tmp, final)
-                moved = True
+                os.link(tmp, final)
+            except FileExistsError:
+                on_exists(final)
+                return
             except PermissionError:
-                # Windows refuses to replace a file another writer published
-                # (read-only, or open for verification) a moment ago.
+                # Windows can refuse while another writer's copy is being
+                # published or verified.
                 if not final.exists():
                     raise
                 on_exists(final)
                 return
             _fsync_directory(shard)
         finally:
-            # After a successful rename the temp name is free again; another
-            # writer's mkstemp could reuse it, so never unlink it then.
-            if not moved:
-                _discard(tmp)
+            # The temp name is always ours (mkstemp); once linked, final holds
+            # its own reference to the published inode.
+            _discard(tmp)
 
     def _install_record(self, final: Path, data: bytes) -> None:
         tmp, _, _ = self._write_temp([data])

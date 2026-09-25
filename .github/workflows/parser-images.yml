@@ -1,0 +1,84 @@
+name: Parser images
+
+# Builds each packaged parser image (roadmap #9, #10) in the trusted build
+# step, parses the representative documents through Stele, and runs the Phase E
+# containment proofs against the image. Heavy (model weights, several GB), so
+# it runs only when the parser images or the code they depend on change.
+
+on:
+  pull_request:
+    paths:
+      - "parsers/**"
+      - "stele/parsers/**"
+      - "stele/containment/**"
+      - "tests/conftest.py"
+      - "tests/test_parser_images.py"
+      - "tests/test_phase_e_containment.py"
+      - "tests/fixtures/documents/**"
+      - ".github/workflows/parser-images.yml"
+  push:
+    branches: [main]
+    paths:
+      - "parsers/**"
+      - "stele/parsers/**"
+      - "stele/containment/**"
+      - ".github/workflows/parser-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        parser: [mineru, marker, docling]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      STELE_PARSER_ENGINE: docker
+    steps:
+      - name: Free disk space for the image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: actions/checkout@v4
+      - name: Install Stele
+        run: |
+          /usr/bin/python3 -m venv .venv
+          .venv/bin/pip install -e '.[dev]'
+      - name: Build the parser image (trusted acquisition step)
+        run: |
+          eval "$(.venv/bin/python -m stele.parsers build-command ${{ matrix.parser }})"
+          docker image ls
+      - name: Build the same image without model weights
+        # Reuses the dependency layers; used to prove a missing model fails
+        # cleanly instead of reaching for the network.
+        run: |
+          docker build --build-arg SKIP_MODELS=1 \
+            --file parsers/${{ matrix.parser }}/Containerfile \
+            --tag localhost/stele/${{ matrix.parser }}:nomodels parsers
+      - name: Parse the representative documents (no skips allowed)
+        shell: bash
+        env:
+          STELE_PARSER_IMAGES: ${{ matrix.parser }}
+          STELE_PARSER_NOMODEL_IMAGE: localhost/stele/${{ matrix.parser }}:nomodels
+        run: |
+          .venv/bin/python -m pytest -m parser_image tests/test_parser_images.py -v -rs | tee parse.log
+          if grep -q "SKIPPED" parse.log; then
+            echo "::error::parser image tests were skipped"; exit 1
+          fi
+      - name: Containment proofs against the parser image (no skips allowed)
+        shell: bash
+        run: |
+          export STELE_PROOF_IMAGES="$(.venv/bin/python -c \
+            'from stele.parsers.catalog import get_parser; print(get_parser("${{ matrix.parser }}").image)')"
+          .venv/bin/python -m pytest tests/test_phase_e_containment.py -q -rs | tee proofs.log
+          if grep -q "SKIPPED" proofs.log; then
+            echo "::error::containment proofs were skipped"; exit 1
+          fi
+      - name: Image size
+        if: always()
+        run: docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}'

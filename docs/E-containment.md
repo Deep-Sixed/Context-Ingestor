@@ -61,6 +61,18 @@ Hosted cloud sandboxes (E2B, Daytona, Fly.io and similar) could be added as
 another backend; the requirements they must meet are in
 [cloud-sandboxes.md](cloud-sandboxes.md). Not implemented yet.
 
+### Packaged parsers (roadmap #9, #10)
+
+Heavy ML parsers (MinerU, Marker, Docling) run on the OCI backend in pinned images with
+model weights baked in: `stele.parsers.run_parser()` or
+`python -m stele.parsers run`. On top of the backend's guarantees, these runs
+require enforced resource limits (`ParserRequirements.resource_limits`), keep
+no output from a failed, timed-out or OOM-killed run
+(`run_in_sandbox(discard_failed_output=True)`), and record the image digest
+and a digest of the parser configuration as the parser's identity. Build
+files, output layout and exit statuses are in
+[parsers/README.md](../parsers/README.md).
+
 ### OCI container backend (roadmap #8)
 
 `stele.containment.oci.OciBackend` drives the Podman or Docker CLI (Podman is

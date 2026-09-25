@@ -7,6 +7,10 @@ proved explicitly on Docker (the default prefers Podman) and with the opt-in
 gVisor runtime (runsc), which CI registers with Docker. A backend that cannot
 run on this host is skipped with its reason.
 
+STELE_PROOF_IMAGES (comma-separated image references) replaces that list with
+the OCI backend running each named image, so the parser-images workflow can
+prove the same guarantees for every packaged parser image (roadmap #9, #10).
+
 sandbox_python is the interpreter command for the chosen backend: bubblewrap
 exposes the host /usr, so it is the host interpreter; a container runs its
 image's own python3.
@@ -17,6 +21,7 @@ tests/test_wasm_backend.py (wasm_backend fixture).
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -34,6 +39,12 @@ _PROVED = [
     ]
     if backend_module.Capability.HOST_PROCESS in b.capabilities()
 ]
+_PROOF_IMAGES = [i for i in os.environ.get("STELE_PROOF_IMAGES", "").split(",") if i]
+if _PROOF_IMAGES:
+    _PROVED = [
+        OciBackend(image=image, engine=os.environ.get("STELE_PARSER_ENGINE") or None)
+        for image in _PROOF_IMAGES
+    ]
 _WASM_BACKENDS = [
     b for b in _REGISTERED if backend_module.Capability.WASM_MODULE in b.capabilities()
 ]
@@ -41,7 +52,10 @@ _WASM_BACKENDS = [
 
 def _proof_id(backend) -> str:
     engine = getattr(backend, "engine", None)
-    return f"{backend.name}-{engine}" if engine else backend.name
+    ident = f"{backend.name}-{engine}" if engine else backend.name
+    if _PROOF_IMAGES:
+        ident += f"-{backend.image}"
+    return ident
 
 
 HOST_PYTHON = str(Path(sys.executable).resolve())

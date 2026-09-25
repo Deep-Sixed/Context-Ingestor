@@ -1,0 +1,59 @@
+# Stele parser image: Marker (roadmap #10). CPU build, x86_64.
+#
+# Build from the repository root (the trusted acquisition step; this is the
+# only time anything is downloaded):
+#
+#   docker build -f parsers/marker/Containerfile -t localhost/stele/marker:2.0.0 parsers
+#
+# Build args:
+#   SKIP_MODELS  1 to build without weights (for testing the missing-model
+#                failure; such an image refuses to parse).
+
+# python:3.12-slim (Debian bookworm), pinned by digest.
+FROM docker.io/library/python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# WeasyPrint (DOCX/PPTX/HTML -> PDF) needs Pango; OpenCV needs glib.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 libglib2.0-0 libgomp1 \
+      fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+
+# Everything except PyTorch is pinned by version and hash. PyTorch comes from
+# the CPU wheel index at the version the lock resolved (the PyPI wheels bundle
+# several GB of CUDA libraries this image does not use).
+COPY marker/requirements.txt /opt/stele/requirements.txt
+RUN pip install --require-hashes --no-deps -r /opt/stele/requirements.txt \
+ && pip install --no-deps --index-url https://download.pytorch.org/whl/cpu \
+      torch==2.14.0 torchvision==0.29.0 \
+ && python -c "import torch; assert not torch.version.cuda, torch.version.cuda"
+
+COPY common/stele_entry.py marker/entry.py marker/warmup.py /opt/stele/
+
+# Model weights and fonts: fetched here, at build time, and nowhere else.
+ENV STELE_MODELS_ROOT=/opt/models \
+    HF_HOME=/opt/models/hf \
+    MODEL_CACHE_DIR=/opt/models/datalab \
+    TORCH_DEVICE=cpu \
+    FAST_DETECTOR_DEVICE=cpu
+ARG SKIP_MODELS=0
+RUN mkdir -p /opt/models \
+ && if [ "$SKIP_MODELS" != "1" ]; then HOME=/tmp/build-home python /opt/stele/warmup.py; fi \
+ && chmod -R a+rX,go-w /opt/models /usr/local/lib/python3.12/site-packages \
+ && rm -rf /tmp/build-home /root/.cache
+
+# Run time: models from the image only, no telemetry, scratch state on the
+# per-run tmpfs (/tmp is the only writable path besides /stele/output).
+ENV HOME=/tmp \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    DO_NOT_TRACK=1
+
+USER 65534:65534
+CMD ["python3", "/opt/stele/entry.py"]

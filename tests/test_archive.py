@@ -258,13 +258,13 @@ class TestIntegrity:
 
 class TestAtomicPublish:
 
-    def test_failed_rename_leaves_no_blob(self, store: BlobStore, monkeypatch) -> None:
+    def test_failed_publish_leaves_no_blob(self, store: BlobStore, monkeypatch) -> None:
         data = b"interrupted"
 
         def crash(src, dst):
-            raise OSError("injected crash during rename")
+            raise OSError("injected crash during publish")
 
-        monkeypatch.setattr(os, "replace", crash)
+        monkeypatch.setattr(os, "link", crash)
         with pytest.raises(OSError, match="injected"):
             store.put_bytes(data)
         monkeypatch.undo()
@@ -296,7 +296,7 @@ class TestAtomicPublish:
         assert not store.has(sha(b"not durable"))
         assert tmp_entries(store) == []
 
-    @pytest.mark.parametrize("kill_at", ["fsync", "replace"])
+    @pytest.mark.parametrize("kill_at", ["fsync", "link"])
     def test_hard_kill_never_exposes_partial_blob(self, store: BlobStore, kill_at: str) -> None:
         """The process dies with no chance to clean up: only tmp/ may hold debris."""
         data = b"A" * 300_000
@@ -319,6 +319,32 @@ class TestAtomicPublish:
         assert len(tmp_entries(store)) == 1  # the orphan, which is never read
         # The store keeps working and the retry is complete and verified.
         assert store.read(store.put_bytes(data)) == data
+
+    def test_racing_writer_never_replaces_a_published_blob(
+        self, store: BlobStore, monkeypatch
+    ) -> None:
+        """Two writers can both find a blob missing; the second must not
+        swap the published inode (a reader verifying the first copy would
+        see the file change under it)."""
+        data = b"published once"
+        digest = store.put_bytes(data)
+        path = blob_file(store, digest)
+        before = os.lstat(path)
+
+        real_exists = Path.exists
+
+        def raced_exists(self: Path) -> bool:
+            # This writer checked just before the other one published.
+            return False if self == path else real_exists(self)
+
+        monkeypatch.setattr(Path, "exists", raced_exists)
+        assert store.put_bytes(data) == digest
+        monkeypatch.undo()
+
+        after = os.lstat(path)
+        assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+        assert store.read(digest) == data
+        assert tmp_entries(store) == []
 
     def test_concurrent_identical_writes(self, store: BlobStore) -> None:
         data = os.urandom(1 << 20)
