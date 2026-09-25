@@ -9,18 +9,59 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  # Full suite, including live bubblewrap containment. The sandbox only exposes
+  # /usr, so the interpreter must be the system Python: the venv below is built
+  # from /usr/bin/python3 and resolves back to it.
+  linux-containment:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install containment dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y apparmor-profiles apparmor-utils bubblewrap python3-pytest
-          sudo install -m 0644             /usr/share/apparmor/extra-profiles/bwrap-userns-restrict             /etc/apparmor.d/bwrap-userns-restrict
+          sudo apt-get install -y apparmor-profiles apparmor-utils bubblewrap python3-venv
+          sudo install -m 0644 \
+            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap-userns-restrict
           sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
       - name: Prove bubblewrap namespace support
         run: |
-          bwrap             --ro-bind / /             --unshare-user --uid 0 --gid 0             --unshare-net             -- /usr/bin/true
+          bwrap \
+            --ro-bind / / \
+            --unshare-user --uid 0 --gid 0 \
+            --unshare-net \
+            -- /usr/bin/true
+      - name: Install Stele with declared dev dependencies
+        run: |
+          /usr/bin/python3 -m venv .venv
+          .venv/bin/pip install -e '.[dev]'
+      - name: Run Stele suite (no skips allowed)
+        # `shell: bash` runs with -eo pipefail, so a failing pytest fails the
+        # step even though its output is piped through tee.
+        shell: bash
+        run: |
+          .venv/bin/python -m pytest tests -q -rs | tee pytest.log
+          # Windows-only tests may skip here; nothing else may.
+          if grep "SKIPPED" pytest.log | grep -qv "Windows feature"; then
+            echo "::error::tests were skipped on the containment runner"
+            exit 1
+          fi
+
+  # Ledger, replay and contracts on macOS and Windows. bubblewrap is Linux-only,
+  # so live containment tests skip there; everything else must pass.
+  portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        python: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Stele with declared dev dependencies
+        run: python -m pip install -e ".[dev]"
       - name: Run Stele suite
-        run: /usr/bin/python3 -m pytest tests -q
+        run: python -m pytest tests -q -rs

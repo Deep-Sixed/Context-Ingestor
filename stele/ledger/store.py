@@ -198,12 +198,13 @@ class LedgerStore:
                 "artifact bundle changed after pending record was created — cannot commit"
             )
 
-        self._conn.execute(
-            "UPDATE artifact_records SET state='committed', finalized_at=? "
-            "WHERE record_id=?",
-            (_now_iso(), record_id),
+        self._transition(
+            record_id,
+            from_states=(ArtifactState.PENDING,),
+            action="commit",
+            set_sql="state='committed', finalized_at=?",
+            params=(_now_iso(),),
         )
-        self._conn.commit()
         return self.get(record_id)
 
     def fail(self, record_id: str, error: str) -> ArtifactRecord:
@@ -223,12 +224,13 @@ class LedgerStore:
                 f"cannot fail record {record_id}: already invalidated"
             )
 
-        self._conn.execute(
-            "UPDATE artifact_records SET state='failed', finalized_at=?, error=? "
-            "WHERE record_id=?",
-            (_now_iso(), error, record_id),
+        self._transition(
+            record_id,
+            from_states=(ArtifactState.PENDING, ArtifactState.FAILED),
+            action="fail",
+            set_sql="state='failed', finalized_at=?, error=?",
+            params=(_now_iso(), error),
         )
-        self._conn.commit()
         return self.get(record_id)
 
     # ------------------------------------------------------------------
@@ -260,6 +262,35 @@ class LedgerStore:
     # Internal
     # ------------------------------------------------------------------
 
+    def _transition(
+        self,
+        record_id: str,
+        *,
+        from_states: tuple[ArtifactState, ...],
+        action: str,
+        set_sql: str,
+        params: tuple,
+    ) -> None:
+        """Apply a state change only if the record is still in from_states.
+
+        The state check and the write happen in one UPDATE, so a concurrent
+        transition on another connection cannot be overwritten (e.g. a commit
+        that raced an invalidation cannot resurrect the record).
+        """
+        placeholders = ",".join("?" * len(from_states))
+        cur = self._conn.execute(
+            f"UPDATE artifact_records SET {set_sql} "
+            f"WHERE record_id=? AND state IN ({placeholders})",
+            (*params, record_id, *(s.value for s in from_states)),
+        )
+        self._conn.commit()
+        if cur.rowcount != 1:
+            current = self._require(record_id).state.value
+            raise InvalidStateTransitionError(
+                f"cannot {action} record {record_id}: state changed to "
+                f"{current!r} concurrently"
+            )
+
     def _require(self, record_id: str) -> ArtifactRecord:
         try:
             return self.get(record_id)
@@ -284,13 +315,13 @@ class LedgerStore:
                 f"cannot invalidate a failed record {record_id} — already terminal"
             )
 
-        self._conn.execute(
-            "UPDATE artifact_records "
-            "SET state='invalidated', finalized_at=?, error=? "
-            "WHERE record_id=?",
-            (_now_iso(), f"INVALIDATED: {reason_note}", record_id),
+        self._transition(
+            record_id,
+            from_states=(ArtifactState.PENDING, ArtifactState.COMMITTED),
+            action="invalidate",
+            set_sql="state='invalidated', finalized_at=?, error=?",
+            params=(_now_iso(), f"INVALIDATED: {reason_note}"),
         )
-        self._conn.commit()
         return self.get(record_id)
 
     def list_by_states(self, states: list[ArtifactState]) -> list[ArtifactRecord]:

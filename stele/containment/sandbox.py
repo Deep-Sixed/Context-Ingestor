@@ -106,6 +106,8 @@ class BubblewrapSandbox:
             "--unshare-pid",   # isolated PID namespace
             "--unshare-uts",   # isolated hostname
             "--unshare-ipc",   # isolated IPC
+            "--unshare-cgroup-try",  # isolated cgroup view, where supported
+            "--new-session",   # own session: no TIOCSTI keystroke injection into the caller's terminal
             "--die-with-parent",  # sandbox dies if the runner process dies
         ]
 

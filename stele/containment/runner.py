@@ -19,6 +19,7 @@ Usage as a CLI:
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import time
 from dataclasses import replace
@@ -32,13 +33,43 @@ from .sandbox import BubblewrapSandbox, SandboxConfig
 from .staging import stage_regular_file
 
 
+class SandboxUnavailableError(RuntimeError):
+    """Raised when the bubblewrap sandbox cannot run on this host."""
+
+
+_BWRAP_MISSING = (
+    "Stele parser containment requires Linux bubblewrap (bwrap), which was not "
+    "found. On macOS or Windows, run Stele inside a Linux VM or container "
+    "(e.g. WSL2, Lima, Docker)."
+)
+
+
+def bwrap_available() -> bool:
+    """True when the bubblewrap binary is on PATH."""
+    return shutil.which("bwrap") is not None
+
+
 def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
     """Execute config.command inside a bubblewrap sandbox and return the result.
 
     The sandbox exits (and all ephemeral writes are discarded) before this
     function returns. Only files found in config.artifact_dir are captured
     in the returned SandboxResult.
+
+    Raises ValueError if config.artifact_dir already has contents: leftover
+    files would otherwise be credited to this run.
     """
+    if config.artifact_dir.exists() and any(config.artifact_dir.iterdir()):
+        raise ValueError(
+            f"artifact_dir {config.artifact_dir} is not empty — "
+            "each run needs a fresh output directory"
+        )
+
+    # Check before staging so hosts without bubblewrap get this error rather
+    # than a staging error (staging itself needs Linux/macOS no-follow opens).
+    if not bwrap_available():
+        raise SandboxUnavailableError(_BWRAP_MISSING)
+
     run_id = uuid4()
     sandbox = BubblewrapSandbox()
     runtime_config = config
@@ -64,6 +95,7 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
         try:
             proc = subprocess.run(
                 argv,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=runtime_config.timeout_seconds,
@@ -71,6 +103,10 @@ def run_in_sandbox(config: SandboxConfig) -> SandboxResult:
             exit_code = proc.returncode
             stdout = proc.stdout
             stderr = proc.stderr
+        except FileNotFoundError as exc:
+            if exc.filename not in (None, argv[0]):
+                raise
+            raise SandboxUnavailableError(_BWRAP_MISSING) from exc
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             exit_code = -1

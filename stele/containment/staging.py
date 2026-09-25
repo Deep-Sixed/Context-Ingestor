@@ -49,7 +49,9 @@ def stage_regular_file(source: Path, staging_dir: Path) -> StagedInput:
     if nofollow is None:
         raise InputStagingError("secure input staging requires O_NOFOLLOW")
 
-    flags = os.O_RDONLY | nofollow
+    # O_NONBLOCK keeps a FIFO swapped in after lstat from blocking the open;
+    # the fstat check below then rejects it.
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
 

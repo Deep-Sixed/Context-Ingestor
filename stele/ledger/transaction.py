@@ -29,7 +29,7 @@ from contextlib import contextmanager
 from typing import Generator
 
 from ..containment.result import SandboxResult
-from .models import ArtifactRecord
+from .models import ArtifactRecord, ArtifactState
 from .store import LedgerStore
 
 
@@ -61,6 +61,10 @@ def ledger_transaction(
 
     Yields the ArtifactRecord in PENDING state so callers can inspect
     it (e.g. to pass record_id to a downstream adapter) before committing.
+
+    With duplicate_policy="ignore", a duplicate yields the existing record
+    unchanged: this transaction did not create it, so it neither commits nor
+    fails it, and exceptions from the block propagate untouched.
     """
     if not sandbox_result.succeeded:
         raise SandboxFailedError(
@@ -85,10 +89,50 @@ def ledger_transaction(
         duplicate_policy=duplicate_policy,
     )
 
+    if record.run_id != str(sandbox_result.run_id):
+        # Existing record returned by duplicate_policy="ignore" — not ours to finalize.
+        yield record
+        return
+
     try:
         yield record
-    except Exception as exc:
-        store.fail(record.record_id, error=repr(exc))
+    except BaseException as exc:
+        # BaseException: a Ctrl-C or SystemExit inside the block must not leave
+        # the record PENDING forever.
+        _fail_quietly(store, record.record_id, exc)
         raise
 
-    store.commit(record.record_id)
+    try:
+        store.commit(record.record_id)
+    except BaseException as exc:
+        if isinstance(exc, Exception) and _state_or_none(store, record.record_id) is (
+            ArtifactState.COMMITTED
+        ):
+            # The COMMITTED write is durable; only the read-back after it
+            # failed. Reporting failure here would make callers undo downstream
+            # work the ledger records as committed.
+            return
+        # The block already ran (downstream writes may exist) but the bundle
+        # failed commit-time verification: record that outcome explicitly.
+        _fail_quietly(store, record.record_id, exc)
+        raise
+
+
+def _state_or_none(store: LedgerStore, record_id: str) -> ArtifactState | None:
+    try:
+        return store.get(record_id).state
+    except Exception:
+        return None
+
+
+def _fail_quietly(store: LedgerStore, record_id: str, exc: BaseException) -> None:
+    """Mark record FAILED without masking the original exception.
+
+    Any error from fail() itself — the record already left PENDING, or the
+    database is locked/unavailable — is swallowed so the caller always sees
+    the original exception. In the second case the record may stay PENDING.
+    """
+    try:
+        store.fail(record_id, error=repr(exc))
+    except Exception:
+        pass

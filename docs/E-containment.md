@@ -14,9 +14,22 @@ execution context. Parsers may not:
 
 ## Mechanism
 
-Use Linux namespaces + seccomp via `bubblewrap` (bwrap) to wrap parser
-invocations. Alternatively, a Docker-based sandbox with no volume mounts to
-production paths and no network access.
+Use Linux namespaces via `bubblewrap` (bwrap) to wrap parser invocations.
+Alternatively, a Docker-based sandbox with no volume mounts to production
+paths and no network access.
+
+### What is enforced today vs. still a goal
+
+| Goal | Status |
+|------|--------|
+| No filesystem access outside the sandbox layout | **Enforced** — mount namespace; only `/usr`, libs, staged input, script and `/stele/output` are visible; `/home`, `/mnt`, `/root`, `/run`, `/var`, `/tmp` are empty tmpfs |
+| No network | **Enforced** — `--unshare-net` (loopback only) |
+| No direct writes to production targets | **Enforced** — only `/stele/output` survives; everything else is ephemeral |
+| No subprocesses without an allowlist | **Not enforced** — parsers may exec any binary under the read-only `/usr`, still inside the same namespaces |
+| seccomp syscall filtering | **Not enforced** — no seccomp filter is passed to bwrap yet |
+
+Bubblewrap is Linux-only. On macOS and Windows the containment layer cannot
+run natively; use a Linux VM or container (e.g. WSL2, Lima, Docker Desktop).
 
 ## Inputs allowed inside sandbox
 
@@ -39,10 +52,14 @@ production paths and no network access.
 - `tests/test_phase_e_containment.py` — 16 live/structural containment tests
 - `tests/test_input_staging.py` — 4 trusted-input staging regression tests
 - `tests/test_artifact_boundary.py` — 3 trusted-output artifact regressions
+- `tests/test_followup_hardening.py` — 11 regressions: FIFO no-block, session/stdin isolation, fresh output dir, ledger duplicate/invalidation fixes
 
 Python binary inside sandbox: selected by the caller; tests use `sys.executable` (CI invokes `/usr/bin/python3`)  
 User namespace: unshared (`--unshare-user`, uid/gid 0 inside namespace only)  
 Network namespace: unshared (`--unshare-net`)  
+Cgroup namespace: unshared where supported (`--unshare-cgroup-try`)  
+Terminal: own session (`--new-session`) and stdin from `/dev/null`, so a parser cannot inject keystrokes (TIOCSTI) into the caller's terminal  
+Output directory: must be empty (or absent) at run start; leftovers are refused rather than credited to the new run  
 Ephemeral mounts: `/tmp`, `/home`, `/mnt`, `/root`, `/run`, `/var`  
 Writable path: `/stele/output` only (bind-mounted from `artifact_dir`)
 
@@ -55,4 +72,5 @@ Writable path: `/stele/output` only (bind-mounted from `artifact_dir`)
 - [x] untrusted input symlinks/non-regular files refused before sandbox bind; copied and hashed from one `O_NOFOLLOW` descriptor
 - [x] parser-created symlink/non-regular output refused before it can reach the ledger
 - [x] network namespace proof sees only loopback inside the parser sandbox
+- [x] artifact/input opens use `O_NONBLOCK`, so a parser-planted FIFO is rejected instead of hanging hashing, commit, or replay
 - [x] Phase F staging path: `artifact_dir` (caller-supplied); ledger schema TBD in Phase F
