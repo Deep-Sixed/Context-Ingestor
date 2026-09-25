@@ -428,6 +428,10 @@ class BlobStore:
         kind = SnapshotKind(kind)
         return self._sharded(self._snapshots / kind.value, _check_digest(digest)).is_file()
 
+    def verify_snapshot(self, snapshot: Snapshot) -> None:
+        """Re-hash every blob a recorded snapshot covers (IntegrityError if any changed)."""
+        self._check_snapshot_content(snapshot)
+
     def _check_snapshot_content(self, snapshot: Snapshot) -> None:
         """Re-hash every blob the snapshot covers; a size match is not enough."""
         if snapshot.kind is SnapshotKind.FILE:
