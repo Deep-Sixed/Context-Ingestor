@@ -237,12 +237,14 @@ def verify_ledger(ledger: LedgerStore, *, anchor: tuple[int, str] | None = None)
         delivery_events: dict[str, list[tuple]] = {}
         replays: dict[str, dict[str, Any]] = {}
         problems: list[str] = []
-        for ev in log.events():
+        # Parse each body here rather than through events(), so a body that
+        # is not JSON is reported like any other tampered event.
+        for row in log._conn.execute("SELECT * FROM events ORDER BY seq"):
             try:
-                _apply(ev, records, deliveries, delivery_events, replays)
-            except (KeyError, TypeError, AttributeError) as exc:
+                _apply(_row_event(row), records, deliveries, delivery_events, replays)
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
                 # A tampered event must be reported, never crash verification.
-                problems.append(f"event {ev.seq} ({ev.kind}) has a malformed body: {exc!r}")
+                problems.append(f"event {row['seq']} ({row['kind']}) has a malformed body: {exc!r}")
 
         conn = log._conn
         rows = {r["record_id"]: r for r in conn.execute("SELECT * FROM artifact_records")}
@@ -259,10 +261,16 @@ def verify_ledger(ledger: LedgerStore, *, anchor: tuple[int, str] | None = None)
                 "image_digest": row["parser_image_digest"],
                 "module_sha256": row["parser_module_sha256"],
             }
-            config = None if row["parser_config"] is None else json.loads(row["parser_config"])
-            conditions = (
-                None if row["run_conditions"] is None else json.loads(row["run_conditions"])
-            )
+            try:
+                config = None if row["parser_config"] is None else json.loads(row["parser_config"])
+                conditions = (
+                    None if row["run_conditions"] is None else json.loads(row["run_conditions"])
+                )
+                manifest_hash = sha256_manifest(json.loads(row["artifact_manifest"]))
+            except (ValueError, TypeError, AttributeError) as exc:
+                # A hand-edited row is reported like any other difference.
+                problems.append(f"record {record_id} has a malformed column: {exc!r}")
+                continue
             actual = {
                 "run_id": row["run_id"], "artifact_hash": row["artifact_hash"],
                 "source_hash": row["source_hash"], "parser": parser,
@@ -273,8 +281,7 @@ def verify_ledger(ledger: LedgerStore, *, anchor: tuple[int, str] | None = None)
                     problems.append(
                         f"record {record_id}: {key} is {actual[key]!r}, the chain says {want[key]!r}"
                     )
-            manifest = json.loads(row["artifact_manifest"])
-            if sha256_manifest(manifest) != row["artifact_hash"]:
+            if manifest_hash != row["artifact_hash"]:
                 problems.append(f"record {record_id}: artifact_manifest no longer matches artifact_hash")
 
         rows = {r["dispatch_id"]: r for r in conn.execute("SELECT * FROM deliveries")}

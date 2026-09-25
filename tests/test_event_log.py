@@ -254,6 +254,27 @@ class TestTampering:
         )
         assert "record forged is in the ledger but was never logged" in verify_ledger(ledger).problems
 
+    def test_event_body_that_is_not_json_is_reported(self, ledger, tmp_path) -> None:
+        """A tampered body is a finding, never a crash of the verification."""
+        _lifecycle(ledger, tmp_path)
+        _raw(ledger).execute("UPDATE events SET body='not json' WHERE seq=1")
+        report = verify_ledger(ledger)
+        assert any("event 1 " in p and "was altered" in p for p in report.chain.problems)
+        assert any(p.startswith("event 1 ") and "malformed body" in p for p in report.problems)
+
+    def test_record_columns_that_are_not_json_are_reported(self, ledger, tmp_path) -> None:
+        ids = _lifecycle(ledger, tmp_path)
+        sqlite3.connect(ledger.db_path, isolation_level=None).execute(
+            "UPDATE artifact_records SET parser_config='{' WHERE record_id=?", (ids["sealed"],),
+        )
+        sqlite3.connect(ledger.db_path, isolation_level=None).execute(
+            "UPDATE artifact_records SET artifact_manifest='[1, 2]' WHERE record_id=?",
+            (ids["withdrawn"],),
+        )
+        problems = verify_ledger(ledger).problems
+        assert any(p.startswith(f"record {ids['sealed']} ") and "malformed" in p for p in problems)
+        assert any(p.startswith(f"record {ids['withdrawn']} ") and "malformed" in p for p in problems)
+
     def test_delivery_and_replay_rows_changed(self, ledger, tmp_path) -> None:
         ids = _lifecycle(ledger, tmp_path)
         conn = _raw(ledger)
