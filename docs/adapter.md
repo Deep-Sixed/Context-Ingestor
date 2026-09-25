@@ -126,11 +126,16 @@ Dispatcher.invalidate(record_id, reason)
             → log removal_receipt (done) | removal_failure (error)
 ```
 
-- Deliveries the log proves wrote nothing are skipped, and removed ones are
-  not removed again. A failed removal is retried by calling `invalidate()`
-  or `retract()` again.
+- Deliveries the log proves hold nothing at the target are skipped: those
+  that wrote nothing, and those removed after their last write concluded. A
+  delivery whose write was still in flight (intent without an outcome) when
+  it was removed may have landed since, e.g. if the dispatching process
+  crashed after writing, so every `retract()` removes it again (removal is
+  idempotent). A failed removal is retried by calling `invalidate()` or
+  `retract()` again.
 - A write that races an invalidation, and lands after the removal pass, is
-  removed by the dispatching Dispatcher as soon as it records the receipt.
+  removed by the dispatching Dispatcher as soon as it records the outcome:
+  a receipt, or a failure that may have written some chunks.
 - A record invalidated directly in the ledger (`stele.replay.invalidation`)
   has its deliveries removed by `Dispatcher.retract_invalidated()`.
 
