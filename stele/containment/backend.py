@@ -1,8 +1,8 @@
 """
 Sandbox backends and capability matching (roadmap #5).
 
-A backend is one isolation technology (bubblewrap and Wasmtime today; OCI
-containers later). Each backend declares the guarantees it enforces and the
+A backend is one isolation technology (bubblewrap, Wasmtime and OCI
+containers today). Each backend declares the guarantees it enforces and the
 workloads it can host. Each parser declares its requirements. Stele runs a
 parser only on a backend that satisfies every requirement and never falls back
 to unsandboxed execution.
@@ -107,6 +107,9 @@ class ExecutionOutcome:
     stderr: str
     wall_time_seconds: float
     timed_out: bool = False
+    # Content digest of the container image that ran, for backends that run
+    # images (part of the parser's identity, roadmap #12); None otherwise.
+    image_digest: str | None = None
     # SHA-256 of the executed WebAssembly module binary, part of the parser's
     # identity. None for host-process backends.
     module_sha256: str | None = None
@@ -279,15 +282,24 @@ def _decode(raw: bytes | str | None) -> str:
 def default_backends() -> list[SandboxBackend]:
     """Registered backends in preference order.
 
-    The two backends host disjoint workloads (host processes vs. Wasm modules),
-    so their relative order never changes which one a parser gets: selection
-    is decided by the workload capability, and order only breaks ties between
-    backends hosting the same kind of workload. Bubblewrap stays first so the
-    default (host-process) parser keeps its existing backend.
+    Host-process backends: bubblewrap comes first; on Linux it needs no daemon,
+    image or privileged engine, and it covers every parser that does not need a
+    GPU or resource limits. The OCI container backend (runc) follows; it is
+    chosen when bubblewrap is unavailable (macOS, Windows, hosts without user
+    namespaces) or lacks a required capability. The GPU variant comes last of
+    those and is only ever chosen for parsers that declare requires_gpu, so no
+    other parser is handed GPU devices. gVisor (runsc) is opt-in and never
+    registered by default.
+
+    Wasmtime hosts a disjoint workload (Wasm modules, not host processes), so
+    its position never changes which backend a parser gets: selection is
+    decided by the workload capability, and order only breaks ties between
+    backends hosting the same kind of workload.
     """
+    from .oci import OciBackend
     from .wasm import WasmtimeBackend
 
-    return [BubblewrapBackend(), WasmtimeBackend()]
+    return [BubblewrapBackend(), OciBackend(), OciBackend(gpu=True), WasmtimeBackend()]
 
 
 def select_backend(

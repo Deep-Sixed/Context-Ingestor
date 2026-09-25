@@ -143,6 +143,7 @@ def run_in_sandbox(
         timed_out=outcome.timed_out,
         input_sha256=input_sha256,
         backend=chosen.name,
+        image_digest=outcome.image_digest,
         module_sha256=outcome.module_sha256,
         hardening=outcome.hardening,
         violation=outcome.violation,
@@ -163,7 +164,7 @@ def _main() -> None:
 
     ap = argparse.ArgumentParser(
         prog="python -m stele.containment.runner",
-        description="Run COMMAND inside a Stele sandbox (bubblewrap, or Wasmtime with --wasm).",
+        description="Run COMMAND inside a Stele sandbox backend (bubblewrap or OCI; Wasmtime with --wasm).",
     )
     ap.add_argument("--artifact-dir", required=True, type=Path, metavar="DIR",
                     help="Host directory bind-mounted as /stele/output (created if absent).")
@@ -216,6 +217,7 @@ def _main() -> None:
         "timed_out": result.timed_out,
         "wall_time_seconds": round(result.wall_time_seconds, 3),
         "backend": result.backend,
+        "image_digest": result.image_digest,
         "hardening": list(result.hardening),
         "violation": result.violation,
         "input_sha256": result.input_sha256,

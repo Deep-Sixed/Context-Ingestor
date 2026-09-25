@@ -5,7 +5,8 @@ Cross-platform behaviour (Linux, macOS, Windows).
   - Manifest keys use POSIX separators, so artifact_hash matches across OSes.
   - The lstat fallback used where O_NOFOLLOW/dir_fd are missing (Windows)
     still refuses symlinked files and parent directories.
-  - A host without bubblewrap gets a clear SandboxUnavailableError.
+  - A host without bubblewrap or a container engine gets a clear
+    SandboxUnavailableError.
   - Input staging without O_NOFOLLOW (Windows) refuses links and swaps.
 """
 from __future__ import annotations
@@ -18,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import stele.containment.runner as runner_module
+from stele.containment.oci import OciBackend
 from stele.containment import staging
 from stele.containment.runner import SandboxUnavailableError, run_in_sandbox
 from stele.containment.sandbox import SandboxConfig
@@ -116,6 +118,8 @@ def test_missing_bubblewrap_reported_before_input_staging(tmp_path: Path, monkey
     source = tmp_path / "input.txt"
     source.write_text("data")
     monkeypatch.setattr(runner_module, "bwrap_available", lambda: False)
+    # ...and no container engine either, so no backend can run here.
+    monkeypatch.setattr(OciBackend, "_find_engines", lambda self: [])
 
     def must_not_stage(*args, **kwargs):
         raise AssertionError("input must not be staged when bwrap is missing")

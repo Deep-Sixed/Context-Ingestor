@@ -3,7 +3,7 @@ Phase E containment proof tests.
 
 These four tests prove the four required properties:
 
-  PASS 1 — Parser runs inside bubblewrap and produces an allowed artifact.
+  PASS 1 — Parser runs inside the sandbox and produces an allowed artifact.
   PASS 2 — Parser cannot write outside approved directories (home, mnt).
   PASS 3 — Exit code, stdout, stderr are faithfully captured.
   PASS 4 — Sandbox failure / ephemeral writes do not produce committed artifacts.
@@ -15,7 +15,6 @@ Run with:
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -26,17 +25,15 @@ from stele.containment.sandbox import SandboxConfig
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PYTHON = str(Path(sys.executable).resolve())
-requires_bwrap = pytest.mark.skipif(
-    sys.platform != "linux" or shutil.which("bwrap") is None,
-    reason="live containment proof requires Linux bubblewrap",
-)
-
-
 
 
 def live_proof(cls):
-    """Run a live containment proof once per registered sandbox backend."""
-    return pytest.mark.usefixtures("containment_backend")(requires_bwrap(cls))
+    """Run a live containment proof once per registered sandbox backend.
+
+    Backends that cannot run on this host are skipped by the fixture with
+    their reason (bubblewrap off Linux, OCI without a Linux container engine).
+    """
+    return pytest.mark.usefixtures("containment_backend")(cls)
 
 
 def _config(script: str, artifact_dir: Path, **kwargs) -> SandboxConfig:
@@ -54,11 +51,11 @@ def _config(script: str, artifact_dir: Path, **kwargs) -> SandboxConfig:
 
 @live_proof
 class TestAllowedArtifact:
-    """Parser runs inside bubblewrap and its output reaches the host via artifact_dir."""
+    """Parser runs inside the sandbox and its output reaches the host via artifact_dir."""
 
-    def test_artifact_written_to_output_dir(self, tmp_path: Path) -> None:
+    def test_artifact_written_to_output_dir(self, tmp_path: Path, sandbox_python: str) -> None:
         config = SandboxConfig(
-            command=[PYTHON, "/stele/parser"],
+            command=[sandbox_python, "/stele/parser"],
             artifact_dir=tmp_path / "artifacts",
             script_path=FIXTURES / "parser_emit_artifact.py",
         )
@@ -75,9 +72,9 @@ class TestAllowedArtifact:
         assert data["parser"] == "fake_parser_v0"
         assert len(data["chunks"]) == 1
 
-    def test_artifact_paths_listed_in_result(self, tmp_path: Path) -> None:
+    def test_artifact_paths_listed_in_result(self, tmp_path: Path, sandbox_python: str) -> None:
         config = SandboxConfig(
-            command=[PYTHON, "/stele/parser"],
+            command=[sandbox_python, "/stele/parser"],
             artifact_dir=tmp_path / "artifacts",
             script_path=FIXTURES / "parser_emit_artifact.py",
         )
@@ -95,9 +92,9 @@ class TestAllowedArtifact:
 class TestForbiddenWrites:
     """Parser cannot write outside /stele/output — attempts raise OSError inside sandbox."""
 
-    def test_write_to_home_blocked(self, tmp_path: Path) -> None:
+    def test_write_to_home_blocked(self, tmp_path: Path, sandbox_python: str) -> None:
         config = SandboxConfig(
-            command=[PYTHON, "/stele/parser"],
+            command=[sandbox_python, "/stele/parser"],
             artifact_dir=tmp_path / "artifacts",
             script_path=FIXTURES / "parser_write_home.py",
         )
@@ -113,9 +110,9 @@ class TestForbiddenWrites:
         )
         assert "blocked" in result.stdout
 
-    def test_write_to_mnt_production_path_blocked(self, tmp_path: Path) -> None:
+    def test_write_to_mnt_production_path_blocked(self, tmp_path: Path, sandbox_python: str) -> None:
         config = SandboxConfig(
-            command=[PYTHON, "/stele/parser"],
+            command=[sandbox_python, "/stele/parser"],
             artifact_dir=tmp_path / "artifacts",
             script_path=FIXTURES / "parser_write_mnt.py",
         )
@@ -130,10 +127,10 @@ class TestForbiddenWrites:
         assert not evil_path.exists(), "evil file appeared on host — containment FAILED"
         assert "blocked" in result.stdout
 
-    def test_no_artifacts_from_forbidden_writer(self, tmp_path: Path) -> None:
+    def test_no_artifacts_from_forbidden_writer(self, tmp_path: Path, sandbox_python: str) -> None:
         """A parser that only attempts forbidden writes must produce zero artifacts."""
         config = SandboxConfig(
-            command=[PYTHON, "/stele/parser"],
+            command=[sandbox_python, "/stele/parser"],
             artifact_dir=tmp_path / "artifacts",
             script_path=FIXTURES / "parser_write_home.py",
         )
@@ -148,9 +145,9 @@ class TestForbiddenWrites:
 @live_proof
 class TestNetworkIsolation:
 
-    def test_only_loopback_interface_visible(self, tmp_path: Path) -> None:
+    def test_only_loopback_interface_visible(self, tmp_path: Path, sandbox_python: str) -> None:
         config = SandboxConfig(
-            command=[PYTHON, "/stele/parser"],
+            command=[sandbox_python, "/stele/parser"],
             artifact_dir=tmp_path / "artifacts",
             script_path=FIXTURES / "parser_network_namespace.py",
         )
@@ -169,9 +166,9 @@ class TestExitStatusCapture:
     """Exit code, stdout, and stderr are faithfully captured regardless of value."""
 
     @pytest.mark.parametrize("code", [0, 1, 2, 42, 127])
-    def test_exit_code_captured(self, tmp_path: Path, code: int) -> None:
+    def test_exit_code_captured(self, tmp_path: Path, sandbox_python: str, code: int) -> None:
         config = SandboxConfig(
-            command=[PYTHON, "/stele/parser"],
+            command=[sandbox_python, "/stele/parser"],
             artifact_dir=tmp_path / f"artifacts_{code}",
             script_path=FIXTURES / "parser_exit_code.py",
             env={"STELE_TEST_EXIT_CODE": str(code)},
@@ -179,9 +176,9 @@ class TestExitStatusCapture:
         result = run_in_sandbox(config)
         assert result.exit_code == code, f"expected exit {code}, got {result.exit_code}"
 
-    def test_stdout_captured(self, tmp_path: Path) -> None:
+    def test_stdout_captured(self, tmp_path: Path, sandbox_python: str) -> None:
         config = SandboxConfig(
-            command=[PYTHON, "/stele/parser"],
+            command=[sandbox_python, "/stele/parser"],
             artifact_dir=tmp_path / "artifacts",
             script_path=FIXTURES / "parser_exit_code.py",
             env={"STELE_TEST_EXIT_CODE": "0"},
@@ -189,10 +186,10 @@ class TestExitStatusCapture:
         result = run_in_sandbox(config)
         assert "exiting with code 0" in result.stdout
 
-    def test_stderr_captured_on_syntax_error(self, tmp_path: Path) -> None:
+    def test_stderr_captured_on_syntax_error(self, tmp_path: Path, sandbox_python: str) -> None:
         """A parser that crashes produces a non-zero exit and stderr."""
         config = SandboxConfig(
-            command=[PYTHON, "-c", "raise RuntimeError('deliberate crash')"],
+            command=[sandbox_python, "-c", "raise RuntimeError('deliberate crash')"],
             artifact_dir=tmp_path / "artifacts",
         )
         result = run_in_sandbox(config)
@@ -211,11 +208,11 @@ class TestNoDurableWriteOutsideArtifactDir:
     zero files on the host — including in artifact_dir.
     """
 
-    def test_tmp_write_is_ephemeral(self, tmp_path: Path) -> None:
+    def test_tmp_write_is_ephemeral(self, tmp_path: Path, sandbox_python: str) -> None:
         # /tmp is writable scratch by default (writable_scratch=True); writes
         # there must still never reach the host.
         config = SandboxConfig(
-            command=[PYTHON, "/stele/parser"],
+            command=[sandbox_python, "/stele/parser"],
             artifact_dir=tmp_path / "artifacts",
             script_path=FIXTURES / "parser_write_tmp_only.py",
             writable_scratch=True,
@@ -235,10 +232,10 @@ class TestNoDurableWriteOutsideArtifactDir:
             "sandbox /tmp isolation FAILED"
         )
 
-    def test_failed_parser_produces_no_artifacts(self, tmp_path: Path) -> None:
+    def test_failed_parser_produces_no_artifacts(self, tmp_path: Path, sandbox_python: str) -> None:
         """A crashing parser must not leave partial artifacts that could be committed."""
         config = SandboxConfig(
-            command=[PYTHON, "-c", "raise RuntimeError('crash before any write')"],
+            command=[sandbox_python, "-c", "raise RuntimeError('crash before any write')"],
             artifact_dir=tmp_path / "artifacts",
         )
         result = run_in_sandbox(config)

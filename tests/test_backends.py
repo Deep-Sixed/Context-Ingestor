@@ -14,8 +14,6 @@ import dataclasses
 import hashlib
 import json
 import os
-import shutil
-import sys
 from pathlib import Path
 
 import pytest
@@ -36,11 +34,6 @@ from stele.containment.sandbox import SandboxConfig
 from stele.containment.staging import InputStagingError, stage_directory, stage_input
 from stele.ledger.hashing import sha256_manifest
 
-PYTHON = str(Path(sys.executable).resolve())
-requires_bwrap = pytest.mark.skipif(
-    sys.platform != "linux" or shutil.which("bwrap") is None,
-    reason="live containment proof requires Linux bubblewrap",
-)
 requires_posix_staging = pytest.mark.skipif(
     not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "fwalk"),
     reason="secure staging requires O_NOFOLLOW and os.fwalk",
@@ -301,7 +294,7 @@ class TestDirectoryStaging:
 # Live bubblewrap: the parser sees exactly the staged bytes
 # ---------------------------------------------------------------------------
 
-@requires_bwrap
+@pytest.mark.usefixtures("containment_backend")
 class TestLiveInputs:
 
     PROBE = (
@@ -318,24 +311,28 @@ class TestLiveInputs:
         "open(os.path.join(os.environ['STELE_OUTPUT_DIR'], 'seen.json'), 'w').write(json.dumps(out))\n"
     )
 
-    def test_file_input_hash_matches_what_parser_read(self, tmp_path: Path) -> None:
+    def test_file_input_hash_matches_what_parser_read(
+        self, tmp_path: Path, containment_backend, sandbox_python: str
+    ) -> None:
         src = tmp_path / "note.md"
         src.write_bytes(b"# staged bytes")
         out = tmp_path / "out"
         result = run_in_sandbox(SandboxConfig(
-            command=[PYTHON, "-c", self.PROBE], artifact_dir=out, input_path=src,
+            command=[sandbox_python, "-c", self.PROBE], artifact_dir=out, input_path=src,
         ))
         assert result.succeeded, result.stderr
-        assert result.backend == "bubblewrap"
+        assert result.backend == containment_backend.name
         seen = json.loads((out / "seen.json").read_text())
         assert seen["file"] == result.input_sha256 == hashlib.sha256(b"# staged bytes").hexdigest()
 
-    def test_directory_input_is_visible_and_hash_matches(self, tmp_path: Path) -> None:
+    def test_directory_input_is_visible_and_hash_matches(
+        self, tmp_path: Path, sandbox_python: str
+    ) -> None:
         src = tmp_path / "corpus"
         files = _tree(src)
         out = tmp_path / "out"
         result = run_in_sandbox(SandboxConfig(
-            command=[PYTHON, "-c", self.PROBE], artifact_dir=out, input_path=src,
+            command=[sandbox_python, "-c", self.PROBE], artifact_dir=out, input_path=src,
         ))
         assert result.succeeded, result.stderr
         seen = json.loads((out / "seen.json").read_text())
