@@ -90,19 +90,21 @@ def discard_artifact_dir_contents(artifact_dir: Path) -> None:
     if not stat.S_ISDIR(root_stat.st_mode):
         raise UnsafeArtifactError(f"artifact_dir is not a directory: {artifact_dir}")
 
-    def _retry_writable(func, path, _exc):  # noqa: ANN001 - rmtree onexc hook
-        parent = os.path.dirname(path)
-        for target in (parent, path):
-            try:
-                if not os.path.islink(target):
-                    os.chmod(target, 0o700)
-            except OSError:
-                pass
-        func(path)
-
+    # The parser has exited, so everything below is ours again, but it may
+    # have made directories unreadable or unsearchable (chmod 000). Open each
+    # one up before descending into it, never following symlinks, so the
+    # removal below cannot be blocked by permissions.
     os.chmod(artifact_dir, stat.S_IMODE(root_stat.st_mode) | 0o700)
+    for dirpath, dirnames, _files in os.walk(artifact_dir, topdown=True, followlinks=False):
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            if not os.path.islink(path):
+                try:
+                    os.chmod(path, 0o700)
+                except OSError:
+                    pass
     for entry in os.scandir(artifact_dir):
         if entry.is_dir(follow_symlinks=False):
-            shutil.rmtree(entry.path, onexc=_retry_writable)
+            shutil.rmtree(entry.path)
         else:
             os.unlink(entry.path)

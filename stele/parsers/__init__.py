@@ -285,6 +285,9 @@ def describe_failure(result: SandboxResult, *, memory: str, timeout: int) -> str
     if result.exit_code != 0:
         detail = _last_line(result.stderr)
         return f"parser exited with status {result.exit_code}" + (f": {detail}" if detail else "")
+    if result.failure is not None:
+        # A failure the exit status does not show, e.g. unsafe output.
+        return f"{result.failure.reason.value}: {result.failure.detail}; output discarded"
     return None
 
 
@@ -356,7 +359,6 @@ def run_parser(
         requirements=requirements,
         backend=chosen,
         store=store,
-        discard_failed_output=True,
     )
     identity = ParserIdentity(
         parser=parser.name,

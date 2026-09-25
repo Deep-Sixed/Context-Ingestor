@@ -176,10 +176,25 @@ class TestRunParser:
         assert run.result.artifact_paths == []
         assert run.result.artifact_digests == {}
         assert run.result.artifact_bundle_digest is None
-        assert out.is_dir() and list(out.iterdir()) == []
+        assert not out.exists()  # the run created it, so the failure removed it
+        assert run.result.failure is not None
         # The input is still evidence of what the parser was given.
         assert run.result.input_snapshot is not None
         assert run.result.input_snapshot.digest == run.result.input_sha256
+
+    @pytest.mark.skipif(os.name == "nt", reason="needs POSIX symlinks")
+    def test_unsafe_output_with_exit_code_0_is_a_failure(self, doc: Path, tmp_path: Path) -> None:
+        class Symlinking(FakeBackend):
+            def execute(self, config):
+                outcome = super().execute(config)
+                os.symlink("/etc/hostname", config.artifact_dir / "link")
+                return outcome
+
+        run = run_parser(PARSER, doc, tmp_path / "out", backend=Symlinking())
+        assert run.result.exit_code == 0
+        assert not run.succeeded
+        assert run.failure.startswith("unsafe_artifact: ")
+        assert run.result.artifact_paths == []
 
     def test_success_stores_the_bundle(self, doc: Path, tmp_path: Path) -> None:
         store = BlobStore(tmp_path / "store")
@@ -363,7 +378,7 @@ class TestLive:
         run = run_parser(_probe(code), doc, tmp_path / "out", store=store, backend=backend)
         assert not run.succeeded
         assert "memory limit" in run.failure, (run.failure, run.result.stderr)
-        assert list((tmp_path / "out").iterdir()) == []
+        assert not (tmp_path / "out").exists()  # a failed run removes the output it created (#11)
         assert run.result.artifact_bundle_digest is None
         # Nothing lands in the caller's working directory (Podman's conmon
         # writes an "oom" file into its own working directory on OOM kills).
@@ -378,7 +393,7 @@ class TestLive:
         )
         run = run_parser(_probe(code), doc, tmp_path / "out", backend=backend, timeout_seconds=5)
         assert run.result.timed_out and "timed out" in run.failure
-        assert list((tmp_path / "out").iterdir()) == []
+        assert not (tmp_path / "out").exists()  # a failed run removes the output it created (#11)
 
 
 # ---------------------------------------------------------------------------

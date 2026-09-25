@@ -37,6 +37,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..archive.records import canonical_json
+from .events import append_event, write_transaction
 from .store import LedgerStore, connect
 
 WRITE_EVENTS = ("intent", "receipt", "failure")
@@ -224,11 +225,17 @@ class DeliveryLog:
     def open_delivery(self, record_id: str, target: Any) -> str:
         """dispatch_id of record_id's delivery to target, created if new."""
         kind, encoded = encode_target(target)
-        self._conn.execute(
-            "INSERT OR IGNORE INTO deliveries "
-            "(dispatch_id, record_id, target_kind, target, created_at) VALUES (?,?,?,?,?)",
-            (str(uuid4()), record_id, kind, encoded, _now()),
-        )
+        dispatch_id = str(uuid4())
+        with write_transaction(self._conn):
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO deliveries "
+                "(dispatch_id, record_id, target_kind, target, created_at) VALUES (?,?,?,?,?)",
+                (dispatch_id, record_id, kind, encoded, _now()),
+            )
+            if cur.rowcount == 1:
+                append_event(self._conn, "delivery.opened", dispatch_id, {
+                    "record_id": record_id, "target_kind": kind, "target": encoded,
+                })
         row = self._conn.execute(
             "SELECT dispatch_id FROM deliveries "
             "WHERE record_id=? AND target_kind=? AND target=?",
@@ -246,16 +253,28 @@ class DeliveryLog:
         done: int | None = None,
         error: str | None = None,
     ) -> None:
-        """Durably append one event (committed before this returns)."""
+        """Durably append one event (committed, with its chain event, before this returns)."""
         try:
-            self._conn.execute(
-                "INSERT INTO delivery_events "
-                "(dispatch_id, event, planned, chunks_digest, done, error, at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (dispatch_id, event, planned, chunks_digest, done, error, _now()),
-            )
+            with write_transaction(self._conn):
+                self._insert(dispatch_id, event, planned, chunks_digest, done, error)
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"cannot record {event!r} for {dispatch_id}: {exc}") from exc
+
+    def _insert(
+        self, dispatch_id: str, event: str, planned: int | None, chunks_digest: str | None,
+        done: int | None, error: str | None,
+    ) -> None:
+        """Insert one delivery event and its chain event (inside a write transaction)."""
+        self._conn.execute(
+            "INSERT INTO delivery_events "
+            "(dispatch_id, event, planned, chunks_digest, done, error, at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (dispatch_id, event, planned, chunks_digest, done, error, _now()),
+        )
+        append_event(self._conn, "delivery.event", dispatch_id, {
+            "event": event, "planned": planned, "chunks_digest": chunks_digest,
+            "done": done, "error": error,
+        })
 
     def append_intent(self, dispatch_id: str, chunks: list[Any]) -> str:
         """Durably record the intent to write chunks; return the bound digest.
@@ -266,8 +285,7 @@ class DeliveryLog:
         them. Two dispatchers racing on one delivery therefore cannot both
         reach their writers with different payloads under its dispatch_id.
         """
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
+        with write_transaction(self._conn):
             first = self._conn.execute(
                 "SELECT planned, chunks_digest FROM delivery_events "
                 "WHERE dispatch_id=? AND event='intent' ORDER BY event_id LIMIT 1",
@@ -283,18 +301,9 @@ class DeliveryLog:
                     "chunks presented now; adapters must be deterministic"
                 )
             try:
-                self._conn.execute(
-                    "INSERT INTO delivery_events "
-                    "(dispatch_id, event, planned, chunks_digest, done, error, at) "
-                    "VALUES (?,'intent',?,?,NULL,NULL,?)",
-                    (dispatch_id, len(chunks), digest, _now()),
-                )
+                self._insert(dispatch_id, "intent", len(chunks), digest, None, None)
             except sqlite3.IntegrityError as exc:  # the payload-binding trigger
                 raise PayloadConflictError(f"delivery {dispatch_id}: {exc}") from exc
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
         return digest
 
     def append_unwritten_failure(self, dispatch_id: str, error: str) -> None:
@@ -305,8 +314,7 @@ class DeliveryLog:
         that write left nothing behind. So done is 0 only when no intent is
         outstanding, and unknown (NULL) otherwise.
         """
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
+        with write_transaction(self._conn):
             last = self._conn.execute(
                 "SELECT event FROM delivery_events WHERE dispatch_id=? "
                 "AND event IN ('intent', 'receipt', 'failure') "
@@ -314,16 +322,7 @@ class DeliveryLog:
                 (dispatch_id,),
             ).fetchone()
             done = None if last is not None and last["event"] == "intent" else 0
-            self._conn.execute(
-                "INSERT INTO delivery_events "
-                "(dispatch_id, event, planned, chunks_digest, done, error, at) "
-                "VALUES (?,'failure',NULL,NULL,?,?,?)",
-                (dispatch_id, done, error, _now()),
-            )
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
+            self._insert(dispatch_id, "failure", None, None, done, error)
 
     def get(self, dispatch_id: str) -> Delivery:
         row = self._conn.execute(

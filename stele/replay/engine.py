@@ -49,6 +49,7 @@ from ..archive.records import canonical_json
 from ..containment.backend import UnsupportedBackendError
 from ..containment.wasm import wasm_module_sha256
 from ..ledger.models import ArtifactRecord, ArtifactState
+from ..ledger.events import append_event, write_transaction
 from ..ledger.store import LedgerStore, connect
 from .models import InvalidationReason
 from .parsers import ParserCatalog, ParserSpec, run_parser
@@ -95,6 +96,15 @@ class ReplayLog:
         self._conn.close()
 
     def append(self, result: ReplayResult) -> None:
+        with write_transaction(self._conn):
+            self._append(result)
+            append_event(self._conn, "replay.logged", result.replay_id, {
+                "record_id": result.record_id, "outcome": result.outcome.value,
+                "reason": result.reason, "replay_artifact_hash": result.replay_artifact_hash,
+                "policy": result.policy, "platform": result.platform,
+            })
+
+    def _append(self, result: ReplayResult) -> None:
         self._conn.execute(
             "INSERT INTO replays (replay_id, record_id, outcome, reason, replay_run_id, "
             "replay_artifact_hash, differences, policy, backend, platform, replayed_at) "

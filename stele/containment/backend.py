@@ -22,16 +22,25 @@ from __future__ import annotations
 
 import enum
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from . import landlock, seccomp
 from .sandbox import BubblewrapSandbox, LandlockLaunch, SandboxConfig
+from .telemetry import (
+    FailureReason,
+    RunFailure,
+    exit_status_failure,
+    signal_failure,
+    timeout_failure,
+)
 
 
 class Capability(enum.Enum):
@@ -137,6 +146,15 @@ class ExecutionOutcome:
     hardening: tuple[str, ...] = ()
     # Set when the parser was stopped for breaking sandbox policy.
     violation: str | None = None
+    # Telemetry (roadmap #11). None means the backend cannot measure it.
+    cpu_time_seconds: float | None = None
+    peak_memory_bytes: int | None = None
+    runtime: str | None = None
+    limits: Mapping[str, Any] = field(default_factory=dict)
+    counters: Mapping[str, Any] = field(default_factory=dict)
+    # The backend's own account of why the run failed; None lets the runner
+    # derive a generic reason from exit_code / timed_out / violation.
+    failure: RunFailure | None = None
 
 
 SECCOMP_VIOLATION = (
@@ -244,11 +262,8 @@ class BubblewrapBackend(SandboxBackend):
         argv = self._sandbox.build_argv(config, seccomp_fd=filter_fd, landlock=launch)
         t0 = time.monotonic()
         try:
-            proc = subprocess.run(
+            proc = run_process(
                 argv,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
                 timeout=config.timeout_seconds,
                 pass_fds=() if filter_fd is None else (filter_fd,),
             )
@@ -256,29 +271,135 @@ class BubblewrapBackend(SandboxBackend):
             if exc.filename not in (None, argv[0]):
                 raise
             raise SandboxUnavailableError(BWRAP_MISSING) from exc
-        except subprocess.TimeoutExpired as exc:
-            return ExecutionOutcome(
-                exit_code=-1,
-                stdout=_decode(exc.stdout),
-                stderr=_decode(exc.stderr),
-                wall_time_seconds=time.monotonic() - t0,
-                timed_out=True,
-                hardening=hardening,
+        wall = time.monotonic() - t0
+
+        violation = None
+        failure: RunFailure | None = None
+        exit_code = -1 if proc.timed_out else proc.returncode
+        if proc.timed_out:
+            failure = timeout_failure(
+                config.timeout_seconds, exit_code,
+                "the sandbox and every process in it were killed",
             )
         # bwrap's init reports a signal death as 128 + signo. A parser could
         # exit with that status on purpose, but that only marks its own run
         # as failed.
-        violation = None
-        if filter_fd is not None and proc.returncode == 128 + seccomp.SIGSYS:
+        elif filter_fd is not None and exit_code == 128 + seccomp.SIGSYS:
             violation = SECCOMP_VIOLATION
+            failure = RunFailure(
+                FailureReason.SYSCALL_BLOCKED, SECCOMP_VIOLATION,
+                exit_code=exit_code, signal=seccomp.SIGSYS,
+            )
+        elif 128 < exit_code <= 128 + 64:
+            failure = signal_failure(exit_code - 128, exit_code)
+        elif exit_code < 0:
+            failure = signal_failure(-exit_code, exit_code, context=" (the sandbox itself)")
+        elif exit_code != 0:
+            failure = exit_status_failure(exit_code)
+
         return ExecutionOutcome(
-            exit_code=proc.returncode,
+            exit_code=exit_code,
             stdout=proc.stdout,
             stderr=proc.stderr,
-            wall_time_seconds=time.monotonic() - t0,
+            wall_time_seconds=wall,
+            timed_out=proc.timed_out,
             hardening=hardening,
             violation=violation,
+            cpu_time_seconds=proc.cpu_time_seconds,
+            peak_memory_bytes=proc.peak_memory_bytes,
+            runtime="bwrap",
+            limits={"timeout_seconds": config.timeout_seconds},
+            failure=failure,
         )
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+    cpu_time_seconds: float | None
+    peak_memory_bytes: int | None
+
+
+def run_process(
+    argv: list[str], *, timeout: float, pass_fds: Sequence[int] = ()
+) -> ProcessResult:
+    """Run argv with no stdin, capture its output, and enforce the timeout.
+
+    The process gets its own process group, and the whole group is killed
+    with SIGKILL at the timeout. It is reaped with wait4, whose resource
+    usage covers it and every descendant it waited for, which gives the
+    run's CPU time and the peak resident memory of its largest process.
+    Hosts without wait4 (Windows) fall back to subprocess.run with no usage.
+    """
+    if not hasattr(os, "wait4"):
+        try:
+            done = subprocess.run(
+                argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=timeout, pass_fds=tuple(pass_fds),
+            )
+        except subprocess.TimeoutExpired as exc:
+            return ProcessResult(-1, _decode(exc.stdout), _decode(exc.stderr), True, None, None)
+        return ProcessResult(done.returncode, done.stdout, done.stderr, False, None, None)
+
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        pass_fds=tuple(pass_fds), start_new_session=True,
+    )
+    streams: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    readers = [
+        threading.Thread(target=_drain, args=(pipe, streams[name]), daemon=True)
+        for name, pipe in (("stdout", proc.stdout), ("stderr", proc.stderr))
+    ]
+    for reader in readers:
+        reader.start()
+
+    lock = threading.Lock()
+    state = {"reaped": False, "killed": False}
+
+    def kill_group() -> None:
+        with lock:
+            # Never signal a pid that was already reaped (it may be reused).
+            if state["reaped"]:
+                return
+            state["killed"] = True
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    timer = threading.Timer(timeout, kill_group)
+    timer.daemon = True
+    timer.start()
+    try:
+        _, status, usage = os.wait4(proc.pid, 0)
+    finally:
+        with lock:
+            state["reaped"] = True
+        timer.cancel()
+    proc.returncode = os.waitstatus_to_exitcode(status)
+    for reader in readers:
+        reader.join(timeout=10)
+    for pipe in (proc.stdout, proc.stderr):
+        pipe.close()
+
+    # ru_maxrss is in KiB on Linux and bytes on macOS.
+    scale = 1 if sys.platform == "darwin" else 1024
+    return ProcessResult(
+        returncode=proc.returncode,
+        stdout=b"".join(streams["stdout"]).decode("utf-8", errors="replace"),
+        stderr=b"".join(streams["stderr"]).decode("utf-8", errors="replace"),
+        timed_out=state["killed"],
+        cpu_time_seconds=usage.ru_utime + usage.ru_stime,
+        peak_memory_bytes=usage.ru_maxrss * scale,
+    )
+
+
+def _drain(pipe: Any, chunks: list[bytes]) -> None:
+    while chunk := pipe.read(65536):
+        chunks.append(chunk)
 
 
 def _sandbox_python() -> str | None:

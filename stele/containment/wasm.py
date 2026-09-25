@@ -58,10 +58,12 @@ import hashlib
 import struct
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 from .backend import Capability, ExecutionOutcome, SandboxBackend
+from .telemetry import FailureReason, RunFailure, exit_status_failure
 from .sandbox import SANDBOX_INPUT_DIR, SANDBOX_OUTPUT, SandboxConfig
 
 WASMTIME_MISSING = (
@@ -212,8 +214,11 @@ class WasmtimeBackend(SandboxBackend):
         module_sha256 = hashlib.sha256(binary).hexdigest()
 
         run = _Run(self, config, binary, preopens)
+        cpu0 = time.thread_time()  # the guest runs on this thread
         try:
             outcome = run.execute()
+            cpu = time.thread_time() - cpu0
+            peak_memory, fuel_consumed = run.peak_memory_bytes, run.fuel_consumed
         finally:
             # The store owns the WASI context, which holds the preopened
             # directories open. A trap's traceback forms a reference cycle
@@ -222,14 +227,48 @@ class WasmtimeBackend(SandboxBackend):
             # the staging directory.
             del run
             gc.collect()
-        return ExecutionOutcome(
-            exit_code=outcome.exit_code,
-            stdout=outcome.stdout,
-            stderr=outcome.stderr,
+        failure = outcome.failure
+        if (
+            failure is not None and failure.reason is FailureReason.WASM_TRAP
+            and peak_memory is not None and peak_memory + _WASM_PAGE > self.memory_limit_bytes
+        ):
+            # The guest trapped with its linear memory at the cap: growth was
+            # refused and the module gave up.
+            failure = RunFailure(
+                FailureReason.OUT_OF_MEMORY,
+                f"linear memory reached the {self.memory_limit_bytes}-byte limit; {failure.detail}",
+                exit_code=failure.exit_code,
+            )
+        return replace(
+            outcome,
             wall_time_seconds=time.monotonic() - t0,
-            timed_out=outcome.timed_out,
             module_sha256=module_sha256,
+            cpu_time_seconds=cpu,
+            peak_memory_bytes=peak_memory,
+            runtime=self.runtime_name(),
+            limits=self.limits(config),
+            counters={} if fuel_consumed is None else {"fuel_consumed": fuel_consumed},
+            failure=failure,
         )
+
+    def runtime_name(self) -> str:
+        try:
+            from importlib.metadata import version
+
+            return f"wasmtime {version('wasmtime')}"
+        except Exception:  # noqa: BLE001 - metadata is best effort
+            return "wasmtime"
+
+    def limits(self, config: SandboxConfig) -> dict[str, Any]:
+        return {
+            "timeout_seconds": config.timeout_seconds,
+            "memory_bytes": self.memory_limit_bytes,
+            "fuel": self.fuel,
+            "output_bytes": self.output_limit_bytes,
+        }
+
+
+_WASM_PAGE = 65536
 
 
 def _failed(code: int, message: str, t0: float) -> ExecutionOutcome:
@@ -238,6 +277,7 @@ def _failed(code: int, message: str, t0: float) -> ExecutionOutcome:
         stdout="",
         stderr=f"stele: {message}\n",
         wall_time_seconds=time.monotonic() - t0,
+        failure=RunFailure(FailureReason.ENGINE_ERROR, message, exit_code=code),
     )
 
 
@@ -309,6 +349,10 @@ class _Run:
         self.entropy = _Entropy(backend.entropy_seed)
         self.inodes: dict[int, int] = {}
         self.listings: dict[int, list[tuple[bytes, int, int]]] = {}
+        # Telemetry, read from the store when the run ends.
+        self.guest_memory: Any = None
+        self.peak_memory_bytes: int | None = None
+        self.fuel_consumed: int | None = None
 
     # -- setup ---------------------------------------------------------------
 
@@ -361,7 +405,21 @@ class _Run:
             return self._instantiate_and_run(wt, engine, store)
         finally:
             timer.cancel()
+            self._measure(store)
             self.shim = None  # exports bound to the store
+            self.guest_memory = None
+
+    def _measure(self, store: Any) -> None:
+        try:
+            self.fuel_consumed = self.backend.fuel - store.get_fuel()
+        except Exception:  # noqa: BLE001 - telemetry must never fail a run
+            self.fuel_consumed = None
+        if self.guest_memory is not None:
+            try:
+                # Linear memory never shrinks, so its size now is its peak.
+                self.peak_memory_bytes = self.guest_memory.data_len(store)
+            except Exception:  # noqa: BLE001
+                self.peak_memory_bytes = None
 
     def _instantiate_and_run(self, wt: Any, engine: Any, store: Any) -> ExecutionOutcome:
         try:
@@ -374,7 +432,9 @@ class _Run:
             linker.allow_shadowing = True
             self._define_deterministic_imports(wt, linker)
         except wt.WasmtimeError as exc:
-            return self._outcome(WASM_LOAD_EXIT_CODE, f"invalid wasm module: {exc}")
+            return self._outcome(
+                WASM_LOAD_EXIT_CODE, f"invalid wasm module: {exc}", reason=FailureReason.ENGINE_ERROR,
+            )
 
         try:
             instance = linker.instantiate(store, module)
@@ -389,12 +449,23 @@ class _Run:
                     WASM_TRAP_EXIT_CODE,
                     f"memory limit of {self.backend.memory_limit_bytes} bytes exceeded "
                     f"at instantiation: {message}",
+                    reason=FailureReason.OUT_OF_MEMORY,
                 )
-            return self._outcome(WASM_LOAD_EXIT_CODE, f"cannot link wasm module: {message}")
+            return self._outcome(
+                WASM_LOAD_EXIT_CODE, f"cannot link wasm module: {message}",
+                reason=FailureReason.ENGINE_ERROR,
+            )
 
-        start = instance.exports(store).get("_start")
+        exports = instance.exports(store)
+        memory = exports.get("memory")
+        if isinstance(memory, wt.Memory):
+            self.guest_memory = memory
+        start = exports.get("_start")
         if start is None:
-            return self._outcome(WASM_LOAD_EXIT_CODE, "wasm module exports no _start function")
+            return self._outcome(
+                WASM_LOAD_EXIT_CODE, "wasm module exports no _start function",
+                reason=FailureReason.ENGINE_ERROR,
+            )
         try:
             start(store)
         except wt.ExitTrap as exc:
@@ -402,7 +473,9 @@ class _Run:
         except wt.Trap as trap:
             return self._trapped(trap)
         except wt.WasmtimeError as exc:
-            return self._outcome(WASM_TRAP_EXIT_CODE, f"wasm execution failed: {exc}")
+            return self._outcome(
+                WASM_TRAP_EXIT_CODE, f"wasm execution failed: {exc}", reason=FailureReason.WASM_TRAP,
+            )
         return self._outcome(0)
 
     def _trapped(self, trap: Any) -> ExecutionOutcome:
@@ -411,25 +484,41 @@ class _Run:
         if code == wt.TrapCode.INTERRUPT:
             return self._outcome(
                 -1, f"wall-clock timeout of {self.config.timeout_seconds}s exceeded",
-                timed_out=True,
+                timed_out=True, reason=FailureReason.TIMEOUT,
             )
         if code == wt.TrapCode.OUT_OF_FUEL:
             return self._outcome(
                 WASM_TRAP_EXIT_CODE,
                 f"CPU limit exceeded: fuel budget of {self.backend.fuel} exhausted",
+                reason=FailureReason.CPU_LIMIT,
             )
-        return self._outcome(WASM_TRAP_EXIT_CODE, f"wasm trap: {trap.message}")
+        return self._outcome(
+            WASM_TRAP_EXIT_CODE, f"wasm trap: {trap.message}", reason=FailureReason.WASM_TRAP,
+        )
 
-    def _outcome(self, code: int, reason: str | None = None, *, timed_out: bool = False) -> ExecutionOutcome:
+    def _outcome(
+        self,
+        code: int,
+        message: str | None = None,
+        *,
+        timed_out: bool = False,
+        reason: FailureReason | None = None,
+    ) -> ExecutionOutcome:
         stderr = self.stderr.text("stderr")
+        if message is not None:
+            stderr += f"stele: {message}\n"
+        failure = None
         if reason is not None:
-            stderr += f"stele: {reason}\n"
+            failure = RunFailure(reason, message or reason.value, exit_code=code)
+        elif code != 0:
+            failure = exit_status_failure(code)
         return ExecutionOutcome(
             exit_code=code,
             stdout=self.stdout.text("stdout"),
             stderr=stderr,
             wall_time_seconds=0.0,
             timed_out=timed_out,
+            failure=failure,
         )
 
     # -- deterministic WASI overrides -----------------------------------------

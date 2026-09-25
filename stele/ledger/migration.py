@@ -3,9 +3,11 @@ Migrating older ledgers to the current schema.
 
 Version 2 (#12) → 3 (#13) adds the delivery log tables, 3 → 4 (#14) the
 replay log, 4 → 5 (#30) the run_conditions column, NULL for existing
-records (their device and limits were never recorded), and 5 → 6 binds each
+records (their device and limits were never recorded), 5 → 6 binds each
 delivery to the payload of its first intent and admits the FAILED replay
-outcome. None of these changes existing rows.
+outcome, and 6 → 7 adds the hash-chained event log. None of these changes
+existing rows; reaching 7 logs every existing record, delivery and replay as
+an *.imported event, so the chain covers the ledger from the migration on.
 
 Version 0 is a pre-#12 ledger.
 
@@ -36,6 +38,7 @@ from pathlib import Path
 
 from ..archive.records import SnapshotKind, Source
 from ..archive.store import ArchiveError, BlobStore
+from .events import EVENTS_DDL, backfill
 from .hashing import UnsafeFileError
 from .store import (
     DELIVERY_DDL,
@@ -61,13 +64,15 @@ _V0_COLUMNS = {
 
 def migrate_to_current(conn: sqlite3.Connection, version: int, archive: BlobStore) -> None:
     """Migrate in place. The caller holds a BEGIN IMMEDIATE transaction."""
-    # version → DDL that reaches version + 1
-    additive = {2: DELIVERY_DDL, 3: REPLAY_DDL, 4: RUN_CONDITIONS_DDL, 5: V6_DDL}
+    # version → DDL that reaches version + 1. Reaching 7 creates the event
+    # log, which then records the state found as *.imported events.
+    additive = {2: DELIVERY_DDL, 3: REPLAY_DDL, 4: RUN_CONDITIONS_DDL, 5: V6_DDL, 6: EVENTS_DDL}
     if version in additive:
         while version in additive:
             for statement in additive[version]:
                 conn.execute(statement)
             version += 1
+        backfill(conn)
         conn.execute(f"PRAGMA user_version = {version}")
         return
     if version != 0:
@@ -102,6 +107,7 @@ def migrate_to_current(conn: sqlite3.Connection, version: int, archive: BlobStor
             tuple(row.values()),
         )
     conn.execute("DROP TABLE artifact_records_v0")
+    backfill(conn)
 
 
 def _migrate_row(old: dict, archive: BlobStore) -> dict:
