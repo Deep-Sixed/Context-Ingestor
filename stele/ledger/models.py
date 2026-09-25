@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -49,6 +50,58 @@ class ParserIdentity:
             raise ValueError(f"not a SHA-256 hex digest: {self.module_sha256!r}")
 
 
+_DEVICES = ("cpu", "gpu")
+_MEMORY_RE = re.compile(r"^[1-9][0-9]*[bkmg]?$")
+
+
+@dataclass(frozen=True)
+class RunConditions:
+    """How a run was executed: the device and the limits it ran under.
+
+    Recorded by Stele's own runner (stele.parsers.replay.record_parser_run
+    takes it from the ParserRun, which applied it), never asserted by a
+    caller, so a replay can run the parser the same way (roadmap #30).
+    """
+
+    device: str = "cpu"                 # "cpu" or "gpu": which image variant ran
+    memory: str | None = None           # container memory limit, e.g. "6g"
+    cpus: float | None = None           # CPU allowance; thread pools follow it
+    pids_limit: int | None = None
+    timeout_seconds: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.device not in _DEVICES:
+            raise ValueError(f"RunConditions.device must be one of {_DEVICES}, not {self.device!r}")
+        if self.memory is not None and (
+            not isinstance(self.memory, str) or not _MEMORY_RE.match(self.memory.lower())
+        ):
+            raise ValueError(f"not a memory limit: {self.memory!r}")
+        if self.cpus is not None:
+            if isinstance(self.cpus, bool) or not isinstance(self.cpus, (int, float)) or self.cpus <= 0:
+                raise ValueError(f"RunConditions.cpus must be positive, not {self.cpus!r}")
+            object.__setattr__(self, "cpus", float(self.cpus))
+        for field_name in ("pids_limit", "timeout_seconds"):
+            value = getattr(self, field_name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+                raise ValueError(f"RunConditions.{field_name} must be a positive integer")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "device": self.device,
+            "memory": self.memory,
+            "cpus": self.cpus,
+            "pids_limit": self.pids_limit,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RunConditions":
+        unknown = set(data) - {"device", "memory", "cpus", "pids_limit", "timeout_seconds"}
+        if unknown:
+            raise ValueError(f"unknown run condition(s): {sorted(unknown)}")
+        return cls(**data)
+
+
 @dataclass(frozen=True)
 class ArtifactRecord:
     """Immutable snapshot of one ledger record: exactly one sandbox run."""
@@ -84,3 +137,8 @@ class ArtifactRecord:
     # A caller-supplied source hash from a pre-#12 ledger that matched no
     # Snapshot in the archive. Unverified; kept only for audit.
     legacy_source_hash: str | None = None
+
+    # The device and limits the run executed under (roadmap #30). None for
+    # runs recorded without them (e.g. Wasm extractors) and for records made
+    # before schema version 5.
+    run_conditions: RunConditions | None = None

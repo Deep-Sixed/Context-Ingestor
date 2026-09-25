@@ -1,18 +1,37 @@
 """The packaged parsers Stele knows how to build and run."""
 from __future__ import annotations
 
-from ..replay.policy import JsonTolerancePolicy
+from ..replay.policy import JsonTolerancePolicy, Tolerance
 from . import ParserImage
 
-# Replay policy for the packaged ML parsers (roadmap #14). The parsers run on
-# the CPU with capped thread pools, but BLAS/onnxruntime reduction order can
-# still move a float in its last digits between runs. Coordinates are in PDF
-# points or pixels: half a unit absorbs that noise, anything larger is a real
-# layout change. Text (Markdown, strings in JSON) must match exactly, and so
-# must every other file. "device" in stele-parser.json is where the run
+# Replay policy for the packaged ML parsers (roadmap #14, #29). The parsers
+# run on the CPU with capped thread pools, but BLAS/onnxruntime reduction order
+# can still move a float in its last digits between runs, so how far a number
+# may move depends on what it measures:
+#
+# - Coordinates, in PDF points or pixels: half a unit absorbs that noise and
+#   anything larger is a real layout change. These are the fields each parser
+#   writes positions under: "bbox" (MinerU blocks and spans, Marker blocks,
+#   Docling prov and table cells, as a list or an {l, t, r, b} object), "poly"
+#   (MinerU layout detections), "polygon" (Marker), "page_size" (MinerU) and
+#   "size" (Docling pages).
+# - Model scores in [0, 1] ("score", "confidence"): 1e-3, so a detection
+#   whose confidence really changed is DIVERGED.
+# - Every other number: near-exact.
+#
+# Text (Markdown, strings in JSON) and integers must match exactly, and so
+# must every non-JSON file. "device" in stele-parser.json is where the run
 # happened, not what it extracted.
+_COORDINATE = Tolerance(rel_tol=1e-6, abs_tol=0.5)
+_SCORE = Tolerance(rel_tol=0.0, abs_tol=1e-3)
 ML_REPLAY_POLICY = JsonTolerancePolicy(
-    rel_tol=1e-6, abs_tol=0.5, ignore_keys=frozenset({"device"}),
+    rel_tol=1e-6,
+    abs_tol=1e-9,
+    ignore_keys=frozenset({"device"}),
+    key_tolerances={
+        **dict.fromkeys(("bbox", "poly", "polygon", "page_size", "size"), _COORDINATE),
+        **dict.fromkeys(("score", "confidence"), _SCORE),
+    },
 )
 
 MINERU = ParserImage(

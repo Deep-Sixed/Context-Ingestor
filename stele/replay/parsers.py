@@ -22,7 +22,7 @@ from ..containment.backend import ParserRequirements, SandboxBackend
 from ..containment.result import SandboxResult
 from ..containment.runner import run_in_sandbox
 from ..containment.sandbox import SandboxConfig
-from ..ledger.models import ParserIdentity
+from ..ledger.models import ParserIdentity, RunConditions
 from .policy import ComparisonPolicy
 
 # (input path or None, artifact dir, parser_config) -> SandboxConfig
@@ -45,6 +45,10 @@ class ParserSpec:
     policy: ComparisonPolicy | None = None
     # Explicit backend, e.g. an OciBackend pinned to the recorded image.
     backend: BackendFactory | None = None
+    # The spec for a record's recorded run conditions (device and limits,
+    # roadmap #30); the replay engine uses its result instead of this spec.
+    # None means the parser runs the same way whatever the record says.
+    with_conditions: Callable[[RunConditions | None], "ParserSpec"] | None = None
 
     def __post_init__(self) -> None:
         # Validates name and version the same way the ledger does.

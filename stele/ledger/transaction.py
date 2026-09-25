@@ -38,7 +38,7 @@ from typing import Any, Generator, Mapping
 
 from ..archive.records import Source
 from ..containment.result import SandboxResult
-from .models import ArtifactRecord, ArtifactState, ParserIdentity
+from .models import ArtifactRecord, ArtifactState, ParserIdentity, RunConditions
 from .store import LedgerStore, ProvenanceError
 
 
@@ -93,6 +93,7 @@ def ledger_transaction(
     parser: ParserIdentity,
     parser_config: Mapping[str, Any],
     source: Source | None = None,
+    run_conditions: RunConditions | None = None,
 ) -> Generator[ArtifactRecord, None, None]:
     """Context manager wrapping a SandboxResult in a ledger transaction.
 
@@ -107,6 +108,10 @@ def ledger_transaction(
     On any exception inside the block, or if sealing fails:
       - Marks the record FAILED with the exception message.
       - Re-raises the original exception.
+
+    run_conditions is the device and limits Stele's runner applied to the
+    run (stele.parsers.replay.record_parser_run passes them from the
+    ParserRun); a replay uses them to run the parser the same way.
 
     Yields the ArtifactRecord in PENDING state.
     """
@@ -136,6 +141,7 @@ def ledger_transaction(
         input_snapshot=sandbox_result.input_snapshot,
         source=source,
         backend=sandbox_result.backend,
+        run_conditions=run_conditions,
     )
 
     if (
@@ -178,10 +184,12 @@ def record_run(
     parser: ParserIdentity,
     parser_config: Mapping[str, Any],
     source: Source | None = None,
+    run_conditions: RunConditions | None = None,
 ) -> ArtifactRecord:
     """Record one run and seal it; return the SEALED record."""
     with ledger_transaction(
-        store, sandbox_result, parser=parser, parser_config=parser_config, source=source
+        store, sandbox_result, parser=parser, parser_config=parser_config, source=source,
+        run_conditions=run_conditions,
     ) as record:
         pass
     return store.get(record.record_id)

@@ -37,6 +37,7 @@ from stele.containment.backend import (
 )
 from stele.containment.oci import DEFAULT_OCI_IMAGE, OciBackend
 from stele.ledger.models import ParserIdentity as ParserIdentityRecord
+from stele.ledger.models import RunConditions
 from stele.ledger.transaction import record_run
 from stele.parsers import (
     CONFIG_ENV,
@@ -448,13 +449,114 @@ class TestReplay:
         result, _ = self._replay(ledger, record, self._files(moved))
         assert result.outcome is ReplayOutcome.DIVERGED
         assert result.differences == (
-            "300.5 != 310.0 beyond tolerance: document.json/bbox[2]",
+            "300.5 != 310.0 beyond tolerance (rel 1e-06, abs 0.5): document.json/bbox[2]",
         )
         result, _ = self._replay(
             ledger, record, self._files(self.LAYOUT, markdown=b"# Quarterly rep0rt\n")
         )
         assert result.outcome is ReplayOutcome.DIVERGED
         assert result.differences == ("bytes differ: document.md",)
+
+    # -- run conditions (roadmap #30) ---------------------------------------
+
+    GPU_PARSER = replace(POLICY_PARSER, gpu="optional", gpu_image="localhost/stele/fake-gpu:1.0")
+
+    def _record_with(self, tmp_path: Path, doc: Path, parser: ParserImage, backend: FakeBackend):
+        ledger = open_ledger(tmp_path / "ledger.db")
+        run = run_parser(parser, doc, tmp_path / "out", store=ledger.archive, backend=backend)
+        assert run.succeeded, run.failure
+        return ledger, record_parser_run(ledger, run, source=Source.from_path(doc))
+
+    def test_run_conditions_are_recorded_and_queryable(self, doc: Path, tmp_path: Path) -> None:
+        ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))
+        assert record.run_conditions == RunConditions(
+            device="cpu", memory="512m", cpus=2.5, pids_limit=1024,
+            timeout_seconds=PARSER.timeout_seconds,
+        )
+        assert ledger.get(record.record_id).run_conditions == record.run_conditions
+        assert [r.record_id for r in ledger.find_by_parser("fake", device="cpu")] == [record.record_id]
+        assert ledger.find_by_parser("fake", device="gpu") == []
+        with pytest.raises(ValueError):
+            ledger.find_by_parser("fake", device="tpu")
+
+    def test_gpu_record_replays_on_the_gpu_image(self, doc: Path, tmp_path: Path) -> None:
+        files = self._files(self.LAYOUT)
+        ledger, record = self._record_with(
+            tmp_path, doc, self.GPU_PARSER, FakeBackend(gpu=True, write=files, name="oci-runc-gpu"),
+        )
+        assert record.run_conditions.device == "gpu"
+
+        replay_backend = FakeBackend(gpu=True, write=files, name="oci-runc-gpu")
+        spec = replay_spec(self.GPU_PARSER, backend=replay_backend)
+        result = replay_record(ledger, ParserCatalog([spec]), record)
+        assert result.outcome is ReplayOutcome.EQUIVALENT, result.reason
+        assert replay_backend.seen.env["STELE_PARSER_DEVICE"] == "gpu"
+
+        # Without an injected backend, the spec for this record runs the GPU
+        # image on a GPU backend, and requires a GPU.
+        real = replay_spec(self.GPU_PARSER).with_conditions(record.run_conditions)
+        backend = real.backend(record.parser)
+        assert isinstance(backend, OciBackend)
+        assert backend.gpu and backend.image == "localhost/stele/fake-gpu:1.0"
+        assert real.requirements.requires_gpu
+
+    def test_gpu_record_without_a_gpu_is_unreplayable(self, doc: Path, tmp_path: Path) -> None:
+        files = self._files(self.LAYOUT)
+        ledger, record = self._record_with(
+            tmp_path, doc, self.GPU_PARSER, FakeBackend(gpu=True, write=files, name="oci-runc-gpu"),
+        )
+        no_gpu = FakeBackend(
+            gpu=True, available=False, name="oci-runc-gpu",
+            reason="no usable GPU: the container engine exposes no NVIDIA GPU",
+        )
+        result = replay_record(
+            ledger, ParserCatalog([replay_spec(self.GPU_PARSER, backend=no_gpu)]), record
+        )
+        assert result.outcome is ReplayOutcome.UNREPLAYABLE
+        assert "no usable GPU" in result.reason
+        assert no_gpu.seen is None  # never fell back to running it elsewhere
+
+    def test_gpu_record_of_a_cpu_only_parser_is_unreplayable(self, doc: Path, tmp_path: Path) -> None:
+        files = self._files(self.LAYOUT)
+        ledger, record = self._record_with(
+            tmp_path, doc, self.GPU_PARSER, FakeBackend(gpu=True, write=files, name="oci-runc-gpu"),
+        )
+        cpu_only = replace(self.GPU_PARSER, gpu="never", gpu_image=None)
+        backend = FakeBackend(write=files)
+        result = replay_record(
+            ledger, ParserCatalog([replay_spec(cpu_only, backend=backend)]), record
+        )
+        assert result.outcome is ReplayOutcome.UNREPLAYABLE
+        assert "no GPU image" in result.reason and backend.seen is None
+
+    def test_custom_limits_replay_unchanged(self, doc: Path, tmp_path: Path) -> None:
+        files = self._files(self.LAYOUT)
+        first = FakeBackend(write=files)
+        first.memory, first.cpus, first.pids_limit = "3g", 4.0, 300
+        ledger = open_ledger(tmp_path / "ledger.db")
+        run = run_parser(self.POLICY_PARSER, doc, tmp_path / "out", store=ledger.archive,
+                         backend=first, timeout_seconds=90)
+        record = record_parser_run(ledger, run, source=Source.from_path(doc))
+        assert record.run_conditions == RunConditions(
+            device="cpu", memory="3g", cpus=4.0, pids_limit=300, timeout_seconds=90,
+        )
+
+        replay_backend = FakeBackend(write=files)
+        spec = replay_spec(self.POLICY_PARSER, backend=replay_backend)
+        result = replay_record(ledger, ParserCatalog([spec]), record)
+        assert result.outcome is ReplayOutcome.EQUIVALENT, result.reason
+        assert replay_backend.seen.env["OMP_NUM_THREADS"] == "4"
+        assert replay_backend.seen.timeout_seconds == 90
+
+        real = replay_spec(self.POLICY_PARSER).with_conditions(record.run_conditions)
+        backend = real.backend(record.parser)
+        assert (backend.memory, backend.cpus, backend.pids_limit, backend.gpu) == ("3g", 4.0, 300, False)
+
+    def test_record_without_conditions_uses_the_defaults(self, doc: Path, tmp_path: Path) -> None:
+        spec = replay_spec(self.POLICY_PARSER).with_conditions(None)
+        backend = spec.backend(None)
+        assert (backend.memory, backend.cpus, backend.gpu) == (PARSER.memory, PARSER.cpus, False)
+        assert backend.image == PARSER.image
 
     def test_image_not_present_is_unreplayable(self, doc: Path, tmp_path: Path) -> None:
         ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))
