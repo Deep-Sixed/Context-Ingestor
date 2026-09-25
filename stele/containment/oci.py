@@ -1,0 +1,561 @@
+"""
+OCI container backend (roadmap #8).
+
+Runs parsers in a Podman or Docker container. On Linux the container shares
+the host kernel (runc) or runs on gVisor's user-space kernel (runsc, opt-in).
+On macOS and Windows the engine's Linux VM is an additional boundary.
+
+The container presents exactly the bubblewrap layout: the staged input at
+/stele/input/<name>, the parser at /stele/parser, and /stele/output as the only
+durable writable path, with STELE_INPUT_PATH / STELE_OUTPUT_DIR set. Parsers are
+therefore portable across backends as long as their command resolves inside the
+image (e.g. ``python3`` rather than a host interpreter path).
+
+Hardening applied to every run: no network, read-only root filesystem, every
+capability dropped, no-new-privileges, a non-root user, memory/CPU/PID limits,
+ephemeral tmpfs scratch space, and a named container that is force-removed on
+timeout. Images are never pulled here: fetching is a separate trusted step, and
+the backend reports itself unavailable until the image is present locally.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import time
+from dataclasses import dataclass, replace
+from pathlib import Path
+from uuid import uuid4
+
+from .backend import (
+    Capability,
+    ExecutionOutcome,
+    SandboxBackend,
+    SandboxUnavailableError,
+    _decode,
+)
+from .sandbox import (
+    _EPHEMERAL_TMPFS,
+    SANDBOX_INPUT_DIR,
+    SANDBOX_OUTPUT,
+    SANDBOX_SCRIPT,
+    SandboxConfig,
+)
+
+# Official Python image, pinned by (multi-arch index) digest. The Phase E
+# fixtures are Python scripts; real parsers bring their own pinned image.
+DEFAULT_OCI_IMAGE = (
+    "docker.io/library/python:3.12-slim"
+    "@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9"
+)
+
+# Engines in preference order: rootless Podman first, then Docker.
+ENGINES = ("podman", "docker")
+
+# Runtimes whose GPU passthrough Stele can vouch for. gVisor (runsc) supports
+# GPUs only through nvproxy for specific drivers, which Stele cannot verify, so
+# GPU is reported unavailable under runsc rather than silently dropped.
+_GPU_CAPABLE_RUNTIMES = frozenset({"runc", "crun"})
+
+# Unprivileged uid/gid (nobody) used when Stele itself runs as host root, so the
+# parser is never uid 0 inside the container.
+_NOBODY = 65534
+
+_PROBE_TIMEOUT = 30
+_LIMIT_CONTROLLERS = frozenset({"memory", "pids", "cpu"})
+_DIGEST_RE = re.compile(r"@(sha256:[0-9a-f]{64})$")
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@dataclass(frozen=True)
+class EngineInfo:
+    """What the container engine reports about itself."""
+
+    kind: str                   # "docker" or "podman" (by info shape, not binary name)
+    os_type: str                # server OS; must be "linux"
+    rootless: bool
+    seccomp: bool               # default seccomp profile active
+    runtimes: frozenset[str]    # OCI runtimes the engine can use by name
+    resource_limits: bool       # memory, CPU and PID limits are enforced, not ignored
+    gpu_flags: tuple[str, ...]  # run flags that pass NVIDIA GPUs through; () if none
+
+
+def parse_engine_info(raw: dict) -> EngineInfo:
+    """Normalize `<engine> info --format '{{json .}}'` for Docker or Podman."""
+    if "host" in raw:  # Podman
+        host = raw.get("host") or {}
+        security = host.get("security") or {}
+        runtime = (host.get("ociRuntime") or {}).get("name")
+        return EngineInfo(
+            kind="podman",
+            os_type=str(host.get("os", "")),
+            rootless=bool(security.get("rootless")),
+            seccomp=bool(security.get("seccompEnabled")),
+            runtimes=frozenset({runtime} if runtime else set()),
+            # Rootless Podman on cgroup v1 (or without delegated controllers)
+            # accepts --memory/--cpus/--pids-limit but silently ignores them.
+            resource_limits=_LIMIT_CONTROLLERS <= set(host.get("cgroupControllers") or []),
+            gpu_flags=("--device", "nvidia.com/gpu=all") if _cdi_has_nvidia_gpu() else (),
+        )
+
+    options = [str(o) for o in raw.get("SecurityOptions") or []]
+    seccomp = any(
+        o.startswith("name=seccomp") and "profile=unconfined" not in o for o in options
+    )
+    runtimes = frozenset((raw.get("Runtimes") or {}).keys())
+    cdi_gpu = any(
+        str(d.get("ID", "")).startswith("nvidia.com/gpu")
+        for d in raw.get("DiscoveredDevices") or []
+        if isinstance(d, dict)
+    )
+    if cdi_gpu:
+        gpu_flags: tuple[str, ...] = ("--device", "nvidia.com/gpu=all")
+    elif "nvidia" in runtimes:
+        gpu_flags = ("--gpus", "all")
+    else:
+        gpu_flags = ()
+    return EngineInfo(
+        kind="docker",
+        os_type=str(raw.get("OSType", "")),
+        rootless=any(o == "name=rootless" for o in options),
+        seccomp=seccomp,
+        runtimes=runtimes,
+        resource_limits=all(raw.get(k) for k in ("MemoryLimit", "PidsLimit", "CpuCfsQuota")),
+        gpu_flags=gpu_flags,
+    )
+
+
+def _cdi_has_nvidia_gpu() -> bool:
+    """True when a CDI spec on this host declares NVIDIA GPU devices."""
+    for spec_dir in ("/etc/cdi", "/var/run/cdi"):
+        try:
+            entries = list(Path(spec_dir).iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.suffix not in (".json", ".yaml", ".yml"):
+                continue
+            try:
+                if "nvidia.com/gpu" in entry.read_text(errors="replace"):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+@dataclass(frozen=True)
+class _Probe:
+    engine: str | None = None
+    info: EngineInfo | None = None
+    image_id: str | None = None
+    image_digest: str | None = None
+    problem: str | None = None
+
+
+class OciBackend(SandboxBackend):
+    """Podman or Docker container with a hardened, read-only configuration.
+
+    runtime="runc" is the default. runtime="runsc" (gVisor) is opt-in and is
+    never silently replaced: if the engine does not have it, the backend is
+    unavailable with that reason. gpu=True passes NVIDIA GPUs through and makes
+    the backend unavailable (never GPU-less) when that cannot be done.
+    """
+
+    def __init__(
+        self,
+        *,
+        image: str = DEFAULT_OCI_IMAGE,
+        engine: str | None = None,
+        runtime: str = "runc",
+        gpu: bool = False,
+        memory: str = "2g",
+        cpus: float = 2.0,
+        pids_limit: int = 512,
+        tmpfs_size: str = "256m",
+    ) -> None:
+        if engine is not None and engine not in ENGINES:
+            raise ValueError(f"unsupported container engine {engine!r}; expected one of {ENGINES}")
+        self.image = image
+        self.engine = engine
+        self.runtime = runtime
+        self.gpu = gpu
+        self.memory = memory
+        self.cpus = cpus
+        self.pids_limit = pids_limit
+        self.tmpfs_size = tmpfs_size
+        self.name = f"oci-{runtime}" + ("-gpu" if gpu else "")
+        self._probe: _Probe | None = None
+
+    # -- probing ------------------------------------------------------------
+
+    def probe(self, *, refresh: bool = False) -> _Probe:
+        """Inspect the engine and image once; cached until refresh=True."""
+        if self._probe is None or refresh:
+            self._probe = self._run_probe()
+        return self._probe
+
+    def _run_probe(self) -> _Probe:
+        engines = self._find_engines()
+        if not engines:
+            wanted = self.engine or " or ".join(ENGINES)
+            return _Probe(problem=f"no container engine found ({wanted} not on PATH)")
+        # Preference order; fall through to the next engine only if one cannot
+        # run this backend (e.g. the image is in Docker's store, not Podman's).
+        probes = [self._probe_engine(engine) for engine in engines[:1]]
+        for engine in engines[1:]:
+            if probes[-1].problem is None:
+                break
+            probes.append(self._probe_engine(engine))
+        if probes[-1].problem is None or len(probes) == 1:
+            return probes[-1]
+        return replace(probes[0], problem="; ".join(
+            f"{Path(p.engine or '?').name}: {p.problem}" for p in probes
+        ))
+
+    def _probe_engine(self, engine: str) -> _Probe:
+        info_raw = _run_json([engine, "info", "--format", "{{json .}}"])
+        if isinstance(info_raw, str):
+            return _Probe(engine=engine, problem=f"`{engine} info` failed: {info_raw}")
+        if not isinstance(info_raw, dict):
+            return _Probe(engine=engine, problem=f"`{engine} info` returned unexpected output")
+        info = parse_engine_info(info_raw)
+
+        if info.os_type != "linux":
+            return _Probe(engine=engine, info=info, problem=(
+                f"{engine} runs {info.os_type or 'non-Linux'} containers; "
+                "Stele parsers need a Linux container engine"
+            ))
+        if info.kind == "docker" and info.rootless:
+            return _Probe(engine=engine, info=info, problem=(
+                "rootless Docker maps container users to subordinate uids, so "
+                "output ownership cannot be preserved; use rootless Podman instead"
+            ))
+        if not self._runtime_known(info):
+            known = ", ".join(sorted(info.runtimes)) or "none reported"
+            return _Probe(engine=engine, info=info, problem=(
+                f"OCI runtime {self.runtime!r} is not configured in {engine} "
+                f"(available: {known}); Stele will not substitute another runtime"
+            ))
+        if self.gpu:
+            gpu_problem = self._gpu_problem(info)
+            if gpu_problem:
+                return _Probe(engine=engine, info=info, problem=gpu_problem)
+
+        image = _run_json([engine, "image", "inspect", self.image])
+        if isinstance(image, str) or not image or not isinstance(image, list):
+            return _Probe(engine=engine, info=info, problem=(
+                f"image {self.image} is not present locally; fetch it in the "
+                f"trusted acquisition step (`{engine} pull {self.image}`) — "
+                "Stele never pulls at run time"
+            ))
+        record = image[0] if isinstance(image[0], dict) else {}
+        image_id = str(record.get("Id") or record.get("ID") or "") or None
+        if image_id is None:
+            return _Probe(engine=engine, info=info, problem=f"`{engine} image inspect` reported no image id")
+        return _Probe(
+            engine=engine,
+            info=info,
+            image_id=image_id,
+            image_digest=_image_digest(self.image, record.get("RepoDigests") or [], image_id),
+        )
+
+    def _find_engines(self) -> list[str]:
+        candidates = (self.engine,) if self.engine else ENGINES
+        return [path for path in map(shutil.which, candidates) if path]
+
+    def _runtime_known(self, info: EngineInfo) -> bool:
+        if self.runtime in info.runtimes:
+            return True
+        # Podman reports only its default runtime but accepts any runtime
+        # binary it can find by name.
+        return info.kind == "podman" and shutil.which(self.runtime) is not None
+
+    def _gpu_problem(self, info: EngineInfo) -> str | None:
+        if self.runtime not in _GPU_CAPABLE_RUNTIMES:
+            return (
+                f"no usable GPU under {self.runtime}: gVisor GPU support (nvproxy) "
+                "cannot be verified, so GPU and gVisor are not combined"
+            )
+        if not info.gpu_flags:
+            return (
+                "no usable GPU: the container engine exposes no NVIDIA GPU "
+                "(no CDI nvidia.com/gpu device or nvidia runtime)"
+            )
+        return None
+
+    # -- SandboxBackend -----------------------------------------------------
+
+    def capabilities(self) -> frozenset[Capability]:
+        caps = {
+            Capability.FILESYSTEM_ISOLATION,
+            Capability.NETWORK_ISOLATION,
+            Capability.NATIVE_LIBS,
+        }
+        # A GPU variant hosts GPU workloads unless its runtime rules GPUs out
+        # (gVisor). Whether this host actually has a usable GPU is checked by
+        # available(), so a GPU parser on a GPU-less host gets
+        # SandboxUnavailableError naming the missing GPU, never a GPU-less run.
+        if self.gpu and self.runtime in _GPU_CAPABLE_RUNTIMES:
+            caps.add(Capability.GPU)
+        probe = self.probe()
+        if probe.problem is None and probe.info is not None:
+            # gVisor intercepts every application syscall in its own kernel and
+            # runs that kernel under a host seccomp filter. Under runc/crun the
+            # claim rests on the engine's default seccomp profile being active.
+            if self.runtime == "runsc" or probe.info.seccomp:
+                caps.add(Capability.SYSCALL_FILTER)
+            # The limits are always requested; claimed only where the engine
+            # reports that its cgroup setup enforces them.
+            if probe.info.resource_limits:
+                caps.add(Capability.RESOURCE_LIMITS)
+        return frozenset(caps)
+
+    def available(self) -> bool:
+        return self.probe().problem is None
+
+    def unavailable_reason(self) -> str:
+        problem = self.probe().problem or "available"
+        return f"OCI container backend ({self.name}): {problem}"
+
+    @property
+    def image_digest(self) -> str | None:
+        """Content digest of the image this backend runs (parser identity, #12)."""
+        return self.probe().image_digest
+
+    def build_argv(self, config: SandboxConfig, *, container_name: str, user: tuple[int, int] | None) -> list[str]:
+        """The engine argv for one run. user=None means rootless Podman keep-id."""
+        probe = self.probe()
+        if probe.problem is not None or probe.info is None or probe.engine is None:
+            raise SandboxUnavailableError(self.unavailable_reason())
+        info = probe.info
+        if not config.command:
+            raise ValueError("SandboxConfig.command is empty")
+
+        argv = [
+            probe.engine, "run",
+            "--rm",
+            "--name", container_name,
+            "--pull", "never",
+            "--runtime", self.runtime,
+            # Isolation
+            "--network", "none",
+            "--read-only",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--ipc", "private",
+            # Resource limits
+            "--memory", self.memory,
+            "--memory-swap", self.memory,  # no swap beyond the memory cap
+            "--cpus", str(self.cpus),
+            "--pids-limit", str(self.pids_limit),
+        ]
+
+        if info.kind == "podman":
+            # Only the tmpfs mounts below; podman would otherwise add its own.
+            argv += ["--read-only-tmpfs=false"]
+            # Belt and braces: conmon kills the container even if Stele dies.
+            argv += ["--timeout", str(max(1, int(config.timeout_seconds)))]
+
+        if user is None:
+            argv += ["--userns", "keep-id"]
+        else:
+            argv += ["--user", f"{user[0]}:{user[1]}"]
+
+        if self.gpu:
+            argv += list(info.gpu_flags)
+
+        # Ephemeral scratch space, mirroring the bubblewrap layout.
+        for path in ["/tmp", *_EPHEMERAL_TMPFS]:
+            argv += ["--tmpfs", f"{path}:rw,nosuid,nodev,size={self.tmpfs_size},mode=1777"]
+
+        # Writable artifact output: the ONLY path that survives the container.
+        config.artifact_dir.mkdir(parents=True, exist_ok=True)
+        argv += ["--mount", _bind(info, config.artifact_dir, SANDBOX_OUTPUT, readonly=False)]
+
+        env: dict[str, str] = {"STELE_OUTPUT_DIR": SANDBOX_OUTPUT}
+        if config.input_path is not None:
+            input_dest = f"{SANDBOX_INPUT_DIR}/{config.input_path.name}"
+            argv += ["--mount", _bind(info, config.input_path, input_dest, readonly=True)]
+            env["STELE_INPUT_PATH"] = input_dest
+        if config.script_path is not None:
+            argv += ["--mount", _bind(info, config.script_path, SANDBOX_SCRIPT, readonly=True)]
+        for src, dst in config.extra_ro_binds:
+            argv += ["--mount", _bind(info, Path(src), dst, readonly=True)]
+
+        # The image's own environment (PATH etc.) is kept; the host's never is.
+        env.update(config.env)
+        for key, val in env.items():
+            if not _ENV_KEY_RE.match(key):
+                raise ValueError(f"invalid environment variable name: {key!r}")
+            argv += ["--env", f"{key}={val}"]
+
+        argv += ["--workdir", SANDBOX_OUTPUT]
+        # Run exactly config.command, whatever ENTRYPOINT the image declares.
+        # Pinned by local image id so the inspected image is the one that runs.
+        argv += ["--entrypoint", config.command[0], probe.image_id or self.image]
+        argv += config.command[1:]
+        return argv
+
+    def execute(self, config: SandboxConfig) -> ExecutionOutcome:
+        probe = self.probe()
+        if probe.problem is not None or probe.engine is None or probe.info is None:
+            raise SandboxUnavailableError(self.unavailable_reason())
+
+        rootless_podman = probe.info.kind == "podman" and probe.info.rootless
+        host_uid = os.getuid() if hasattr(os, "getuid") else _NOBODY
+        host_gid = os.getgid() if hasattr(os, "getgid") else _NOBODY
+        if rootless_podman:
+            user: tuple[int, int] | None = None
+        elif host_uid == 0:
+            user = (_NOBODY, _NOBODY)
+        else:
+            user = (host_uid, host_gid)
+
+        container_name = f"stele-{uuid4().hex}"
+        config.artifact_dir.mkdir(parents=True, exist_ok=True)
+        handoff = _RootHandoff(config) if user == (_NOBODY, _NOBODY) and host_uid == 0 else None
+        if handoff is not None:
+            handoff.give()
+        try:
+            argv = self.build_argv(config, container_name=container_name, user=user)
+            outcome = self._run(argv, probe.engine, container_name, config.timeout_seconds)
+        finally:
+            if handoff is not None:
+                handoff.take_back()
+        return outcome
+
+    def _run(self, argv: list[str], engine: str, container_name: str, timeout: int) -> ExecutionOutcome:
+        t0 = time.monotonic()
+        try:
+            proc = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            if exc.filename not in (None, argv[0]):
+                raise
+            raise SandboxUnavailableError(self.unavailable_reason()) from exc
+        except subprocess.TimeoutExpired as exc:
+            # Killing the CLI client does not stop the container; remove it.
+            _force_remove(engine, container_name)
+            return ExecutionOutcome(
+                exit_code=-1,
+                stdout=_decode(exc.stdout),
+                stderr=_decode(exc.stderr),
+                wall_time_seconds=time.monotonic() - t0,
+                timed_out=True,
+                image_digest=self.image_digest,
+            )
+        return ExecutionOutcome(
+            exit_code=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            wall_time_seconds=time.monotonic() - t0,
+            image_digest=self.image_digest,
+        )
+
+
+class _RootHandoff:
+    """When Stele runs as host root, the parser runs as nobody.
+
+    The private staged input and the output directory are handed to nobody for
+    the run and returned afterwards, so the parser can read its input and write
+    artifacts while Stele's view of ownership is unchanged. Never follows
+    symlinks. The parser script and extra binds must already be world-readable.
+    """
+
+    def __init__(self, config: SandboxConfig) -> None:
+        self._output = config.artifact_dir
+        out_stat = os.lstat(self._output)
+        self._owner = (out_stat.st_uid, out_stat.st_gid)
+        self._input = config.input_path
+        self._input_owners: dict[str, tuple[int, int]] = {}
+
+    def give(self) -> None:
+        os.lchown(self._output, _NOBODY, _NOBODY)
+        if self._input is not None:
+            for path in _walk_no_follow(self._input):
+                st = os.lstat(path)
+                self._input_owners[path] = (st.st_uid, st.st_gid)
+                os.lchown(path, _NOBODY, _NOBODY)
+
+    def take_back(self) -> None:
+        for path in _walk_no_follow(self._output):
+            os.lchown(path, *self._owner)
+        for path, owner in self._input_owners.items():
+            try:
+                os.lchown(path, *owner)
+            except FileNotFoundError:
+                pass
+
+
+def _walk_no_follow(root: Path) -> list[str]:
+    paths = [str(root)]
+    if os.path.isdir(root) and not os.path.islink(root):
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            paths += [os.path.join(dirpath, n) for n in dirnames + filenames]
+    return paths
+
+
+def _bind(info: EngineInfo, src: Path, dst: str, *, readonly: bool) -> str:
+    """A --mount value. Refuses characters that would change the mount spec."""
+    fields = ["type=bind", f"source={src}", f"target={dst}"]
+    if readonly:
+        fields.append("readonly")
+    for field in fields:
+        if any(ch in field for ch in (",", '"', "\n", "\r", "\0")):
+            raise ValueError(
+                f"path cannot be passed to {info.kind} --mount safely "
+                f"(contains a comma, quote or control character): {field}"
+            )
+    return ",".join(fields)
+
+
+def _image_digest(ref: str, repo_digests: list, image_id: str) -> str:
+    """The pinned digest when the reference has one, else the best local digest."""
+    pinned = _DIGEST_RE.search(ref)
+    if pinned:
+        return pinned.group(1)
+    for entry in repo_digests:
+        match = _DIGEST_RE.search(str(entry))
+        if match:
+            return match.group(1)
+    return image_id if image_id.startswith("sha256:") else f"sha256:{image_id}"
+
+
+def _run_json(argv: list[str]) -> object:
+    """Run a probe command; parsed JSON on success, an error string otherwise."""
+    try:
+        proc = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return str(exc)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        return detail[-1] if detail else f"exit {proc.returncode}"
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return f"unparseable output: {exc}"
+
+
+def _force_remove(engine: str, container_name: str) -> None:
+    try:
+        subprocess.run(
+            [engine, "rm", "-f", container_name],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass

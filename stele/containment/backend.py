@@ -1,8 +1,8 @@
 """
 Sandbox backends and capability matching (roadmap #5).
 
-A backend is one isolation technology (bubblewrap today; Wasm/WASI and OCI
-containers later). Each backend declares the guarantees it enforces and the
+A backend is one isolation technology (bubblewrap, OCI containers; Wasm/WASI
+later). Each backend declares the guarantees it enforces and the
 workloads it can host. Each parser declares its requirements. Stele runs a
 parser only on a backend that satisfies every requirement and never falls back
 to unsandboxed execution.
@@ -92,6 +92,9 @@ class ExecutionOutcome:
     stderr: str
     wall_time_seconds: float
     timed_out: bool = False
+    # Content digest of the container image that ran, for backends that run
+    # images (part of the parser's identity, roadmap #12); None otherwise.
+    image_digest: str | None = None
 
 
 class SandboxBackend(ABC):
@@ -186,8 +189,19 @@ def _decode(raw: bytes | str | None) -> str:
 
 
 def default_backends() -> list[SandboxBackend]:
-    """Registered backends in preference order."""
-    return [BubblewrapBackend()]
+    """Registered backends in preference order.
+
+    bubblewrap comes first: on Linux it needs no daemon, image or privileged
+    engine, and it covers every parser that does not need a GPU or resource
+    limits. The OCI container backend (runc) follows; it is chosen when
+    bubblewrap is unavailable (macOS, Windows, hosts without user namespaces)
+    or lacks a required capability. The GPU variant is last and is only ever
+    chosen for parsers that declare requires_gpu, so no other parser is handed
+    GPU devices. gVisor (runsc) is opt-in and never registered by default.
+    """
+    from .oci import OciBackend
+
+    return [BubblewrapBackend(), OciBackend(), OciBackend(gpu=True)]
 
 
 def select_backend(

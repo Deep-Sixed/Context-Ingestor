@@ -26,6 +26,9 @@ class SandboxResult:
     input_sha256: str | None = None
     # Name of the sandbox backend that executed the run, e.g. "bubblewrap".
     backend: str | None = None
+    # Content digest of the container image that ran the parser (OCI backend);
+    # None for backends that do not run images.
+    image_digest: str | None = None
 
     @property
     def succeeded(self) -> bool:
