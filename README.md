@@ -34,6 +34,12 @@ codebases that handle hostile input. Stele treats every parser as untrusted:
   structured reason (timeout, out of memory, CPU limit, blocked syscall, Wasm
   trap, crash, exit status, engine error, unsafe output) and leaves no output,
   staging copy, process or container behind.
+- **Detect tampering.** Every ledger fact (a record created, sealed, failed
+  or invalidated, each delivery event, each replay) is appended to a
+  hash-chained event log in the same transaction as the change.
+  `python -m stele.ledger.events` verifies the chain, and checks that the
+  ledger's tables still match what it records. With a published anchor, it
+  also catches a truncated and rewritten log.
 - **Ingest ChatGPT exports whole.** A Wasm extractor splits `conversations.json`
   byte for byte, and `ChatGPTExportAdapter` turns the sealed result into one
   chunk per message on every conversation branch (edits and regenerations
@@ -140,7 +146,7 @@ Details and known limits: [docs/containment.md](docs/containment.md).
 | Doc | Covers |
 |-----|--------|
 | [Containment](docs/containment.md) | Sandbox backends, seccomp, Landlock, OCI and Wasm details, run telemetry and failure reasons |
-| [Ledger](docs/ledger.md) | State machine, record fields, parser identity, migration |
+| [Ledger](docs/ledger.md) | State machine, record fields, parser identity, migration, the hash-chained event log |
 | [Replay](docs/replay.md) | Validation, replay outcomes, invalidation, ledger views |
 | [Adapter contract](docs/adapter.md) | `SteleAdapter`, `TargetWriter`, the Dispatcher and delivery log, the ChatGPT export adapter |
 | [Evidence store](docs/archive.md) | Content-addressed Snapshot and artifact archive |
@@ -153,7 +159,7 @@ Details and known limits: [docs/containment.md](docs/containment.md).
 stele/
 ├── containment/   sandbox backends (bubblewrap, OCI, Wasmtime), staging, seccomp, Landlock
 ├── archive/       content-addressed evidence store
-├── ledger/        artifact ledger and delivery log (SQLite, WAL)
+├── ledger/        artifact ledger, delivery log and hash-chained event log (SQLite, WAL)
 ├── replay/        validation, replay engine, invalidation, views
 ├── contracts/     adapter, dispatcher and target-writer protocols
 ├── adapters/      adapters (ChatGPT export: every branch, streamed)

@@ -32,6 +32,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..archive.records import canonical_json
+from .events import append_event, write_transaction
 from .store import LedgerStore, connect
 
 WRITE_EVENTS = ("intent", "receipt", "failure")
@@ -180,11 +181,17 @@ class DeliveryLog:
     def open_delivery(self, record_id: str, target: Any) -> str:
         """dispatch_id of record_id's delivery to target, created if new."""
         kind, encoded = encode_target(target)
-        self._conn.execute(
-            "INSERT OR IGNORE INTO deliveries "
-            "(dispatch_id, record_id, target_kind, target, created_at) VALUES (?,?,?,?,?)",
-            (str(uuid4()), record_id, kind, encoded, _now()),
-        )
+        dispatch_id = str(uuid4())
+        with write_transaction(self._conn):
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO deliveries "
+                "(dispatch_id, record_id, target_kind, target, created_at) VALUES (?,?,?,?,?)",
+                (dispatch_id, record_id, kind, encoded, _now()),
+            )
+            if cur.rowcount == 1:
+                append_event(self._conn, "delivery.opened", dispatch_id, {
+                    "record_id": record_id, "target_kind": kind, "target": encoded,
+                })
         row = self._conn.execute(
             "SELECT dispatch_id FROM deliveries "
             "WHERE record_id=? AND target_kind=? AND target=?",
@@ -202,14 +209,19 @@ class DeliveryLog:
         done: int | None = None,
         error: str | None = None,
     ) -> None:
-        """Durably append one event (committed before this returns)."""
+        """Durably append one event (committed, with its chain event, before this returns)."""
         try:
-            self._conn.execute(
-                "INSERT INTO delivery_events "
-                "(dispatch_id, event, planned, chunks_digest, done, error, at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (dispatch_id, event, planned, chunks_digest, done, error, _now()),
-            )
+            with write_transaction(self._conn):
+                self._conn.execute(
+                    "INSERT INTO delivery_events "
+                    "(dispatch_id, event, planned, chunks_digest, done, error, at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (dispatch_id, event, planned, chunks_digest, done, error, _now()),
+                )
+                append_event(self._conn, "delivery.event", dispatch_id, {
+                    "event": event, "planned": planned, "chunks_digest": chunks_digest,
+                    "done": done, "error": error,
+                })
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"cannot record {event!r} for {dispatch_id}: {exc}") from exc
 

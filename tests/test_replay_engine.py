@@ -463,9 +463,11 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     db = tmp_path / "ledger.db"
     open_ledger(db).close()
     conn = sqlite3.connect(db)
-    conn.execute("DROP TRIGGER replays_append_only_u")
-    conn.execute("DROP TRIGGER replays_append_only_d")
+    for name in ("replays_append_only_u", "replays_append_only_d",
+                 "events_append_only_u", "events_append_only_d"):
+        conn.execute(f"DROP TRIGGER {name}")
     conn.execute("DROP TABLE replays")
+    conn.execute("DROP TABLE events")
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -473,5 +475,5 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     ledger = open_ledger(db)
     assert ReplayLog(ledger).all() == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     conn.close()

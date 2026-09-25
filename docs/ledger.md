@@ -128,11 +128,12 @@ In each case the record stays `pending` (and `ledger_transaction` marks it
 ## Storage and migration
 
 SQLite in WAL mode, with a schema that maps 1:1 to Postgres. The schema
-version is `PRAGMA user_version` (currently 4: records, the delivery log
-added by #13, and the replay log added by #14). Opening a ledger of an older version migrates it in one write
-transaction (`stele/ledger/migration.py`): either the migration completes or
-the database is left unchanged. Versions 2 → 3 → 4 only add the delivery and
-replay logs.
+version is `PRAGMA user_version` (currently 5: records, the delivery log
+added by #13, the replay log added by #14, and the hash-chained event log).
+Opening a ledger of an older version migrates it in one write transaction
+(`stele/ledger/migration.py`): either the migration completes or the database
+is left unchanged. Versions 2 → 3 → 4 → 5 only add tables. Reaching 5 logs
+every existing record, delivery and replay as an `*.imported` event.
 
 Migrating a pre-#12 (version 0) ledger:
 
@@ -150,16 +151,63 @@ Two records for one `run_id` cannot be represented; migration stops with
 `LedgerMigrationError` and changes nothing. A ledger newer than this Stele
 raises `LedgerSchemaError`.
 
+## Hash-chained event log
+
+Every fact the ledger learns is also appended to `events`
+(`stele/ledger/events.py`), in the same transaction as the change itself, so
+the two can't diverge:
+
+| Event | When |
+|---|---|
+| `record.created` | `create_pending`: run, artifact hash, input Snapshot, Source, parser identity and config, backend |
+| `record.sealed` / `record.failed` / `record.invalidated` | each state transition, with its error or reason |
+| `delivery.opened` / `delivery.event` | each delivery and each intent, receipt, failure or removal in the delivery log |
+| `replay.logged` | each replay and its outcome |
+| `*.imported` | the state found when a ledger was migrated to version 5 |
+
+**The chain.**
+- Each event's hash is SHA-256 over the canonical JSON of its sequence number,
+  kind, subject, body, timestamp and the previous event's hash. The first
+  event follows 64 zeros.
+- Changing, deleting or reordering an event breaks every hash after it, and
+  the head `(seq, hash)` commits to the whole history.
+- The table is append-only (triggers refuse `UPDATE` and `DELETE`), but
+  verification doesn't trust that: it recomputes everything.
+
+**Verification.** `verify_ledger(ledger, anchor=None)` does two things:
+1. It verifies the chain: every hash, every link, no gaps in the sequence.
+2. It replays the chain to rebuild what the ledger's tables must contain
+   (each record's state and identity, each delivery and its events, each
+   replay) and reports every difference. This catches edits to
+   `artifact_records`, the one table whose rows legitimately change, such as
+   an `invalidated` record flipped back to `sealed` by hand.
+
+A tampered event body is reported, never a crash.
+
+**Anchors.** Publish the head (`EventLog(ledger).head()`) somewhere Stele
+doesn't control. Verifying with `anchor=(seq, hash)` then also proves the
+chain still contains that exact event, so truncating the log and rewriting
+it from there is caught.
+
+```
+python -m stele.ledger.events ledger.db archive/ [--anchor SEQ:HASH]
+```
+
+This prints `ok`, the chain length, the head and every problem, and exits 1
+if there is any problem.
+
 ## Implementation
 
 - `stele/ledger/models.py` — `ArtifactRecord`, `ArtifactState`, `ParserIdentity`
 - `stele/ledger/hashing.py` — `sha256_file`, `sha256_manifest`, `build_manifest`
 - `stele/ledger/store.py` — `LedgerStore` (SQLite, WAL mode)
 - `stele/ledger/transaction.py` — `ledger_transaction`, `record_run`
-- `stele/ledger/migration.py` — migration from schema versions 0, 2 and 3
+- `stele/ledger/migration.py` — migration from schema versions 0, 2, 3 and 4
+- `stele/ledger/events.py` — the hash-chained event log, `verify_ledger`, CLI
 - `stele/ledger/delivery.py` — the delivery log (#13)
 - `tests/test_ledger.py` — state machine, hashing, per-run records
 - `tests/test_ledger_provenance.py` — Snapshot provenance, parser identity, sealing, migration
+- `tests/test_event_log.py` — chaining, verification, tamper detection, anchors, migration, CLI
 
 ## Completion criteria
 

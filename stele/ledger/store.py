@@ -22,13 +22,14 @@ from uuid import uuid4
 from ..archive.ingest import ingest_artifacts
 from ..archive.records import Snapshot, SnapshotKind, Source, canonical_json
 from ..archive.store import BlobStore, MissingObjectError
+from .events import EVENTS_DDL, append_event, record_body, write_transaction
 from .hashing import UnsafeFileError, build_manifest, sha256_manifest
 from .models import ArtifactRecord, ArtifactState, ParserIdentity
 
 # PRAGMA user_version of the current schema. 0 is a pre-#12 ledger (or an
 # empty database), 2 has records only, 3 adds the delivery log (#13), 4 the
-# replay log (#14); see stele/ledger/migration.py.
-SCHEMA_VERSION = 4
+# replay log (#14), 5 the hash-chained event log; see stele/ledger/migration.py.
+SCHEMA_VERSION = 5
 
 _DDL = (
     """
@@ -245,7 +246,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create the current schema. The caller holds the write transaction."""
-    for statement in (*_DDL, *DELIVERY_DDL, *REPLAY_DDL):
+    for statement in (*_DDL, *DELIVERY_DDL, *REPLAY_DDL, *EVENTS_DDL):
         conn.execute(statement)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -402,23 +403,25 @@ class LedgerStore:
         artifact_hash = sha256_manifest(manifest)
 
         record_id = str(uuid4())
+        row = {
+            "record_id": record_id, "run_id": run_id, "source_path": source_path,
+            "source_id": source_id, "source_hash": source_hash, "source_kind": source_kind,
+            "parser_name": parser.name, "parser_version": parser.version,
+            "parser_image_digest": parser.image_digest,
+            "parser_module_sha256": parser.module_sha256,
+            "parser_config": config_json, "backend": backend,
+            "artifact_dir": str(artifact_dir), "artifact_manifest": json.dumps(manifest),
+            "artifact_hash": artifact_hash, "created_at": _now_iso(),
+        }
         try:
-            self._conn.execute(
-                """
-                INSERT INTO artifact_records
-                    (record_id, run_id, source_path, source_id, source_hash, source_kind,
-                     parser_name, parser_version, parser_image_digest, parser_module_sha256,
-                     parser_config, backend, artifact_dir, artifact_manifest,
-                     artifact_hash, state, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-                """,
-                (
-                    record_id, run_id, source_path, source_id, source_hash, source_kind,
-                    parser.name, parser.version, parser.image_digest, parser.module_sha256,
-                    config_json, backend, str(artifact_dir), json.dumps(manifest),
-                    artifact_hash, _now_iso(),
-                ),
-            )
+            # The record and its record.created event commit together.
+            with write_transaction(self._conn):
+                self._conn.execute(
+                    f"INSERT INTO artifact_records ({', '.join(row)}, state) "
+                    f"VALUES ({', '.join('?' * len(row))}, 'pending')",
+                    tuple(row.values()),
+                )
+                append_event(self._conn, "record.created", record_id, record_body(row))
         except sqlite3.IntegrityError as exc:
             existing = self.get_by_run_id(run_id)
             if existing is None:
@@ -457,6 +460,7 @@ class LedgerStore:
             action="seal",
             set_sql="state='sealed', finalized_at=?",
             params=(_now_iso(),),
+            event=("record.sealed", {"artifact_hash": record.artifact_hash}),
         )
         return self.get(record_id)
 
@@ -483,6 +487,7 @@ class LedgerStore:
             action="fail",
             set_sql="state='failed', finalized_at=?, error=?",
             params=(_now_iso(), error),
+            event=("record.failed", {"error": error}),
         )
         return self.get(record_id)
 
@@ -510,6 +515,7 @@ class LedgerStore:
             action="invalidate",
             set_sql="state='invalidated', finalized_at=?, error=?",
             params=(_now_iso(), f"INVALIDATED: {reason_note}"),
+            event=("record.invalidated", {"reason": reason_note}),
         )
         return self.get(record_id)
 
@@ -584,19 +590,24 @@ class LedgerStore:
         action: str,
         set_sql: str,
         params: tuple,
+        event: tuple[str, dict[str, Any]],
     ) -> None:
         """Apply a state change only if the record is still in from_states.
 
         The state check and the write happen in one UPDATE, so a concurrent
         transition on another connection cannot be overwritten (e.g. a seal
-        that raced an invalidation cannot resurrect the record).
+        that raced an invalidation cannot resurrect the record). The change
+        and its event commit in one transaction.
         """
         placeholders = ",".join("?" * len(from_states))
-        cur = self._conn.execute(
-            f"UPDATE artifact_records SET {set_sql} "
-            f"WHERE record_id=? AND state IN ({placeholders})",
-            (*params, record_id, *(s.value for s in from_states)),
-        )
+        with write_transaction(self._conn):
+            cur = self._conn.execute(
+                f"UPDATE artifact_records SET {set_sql} "
+                f"WHERE record_id=? AND state IN ({placeholders})",
+                (*params, record_id, *(s.value for s in from_states)),
+            )
+            if cur.rowcount == 1:
+                append_event(self._conn, event[0], record_id, event[1])
         if cur.rowcount != 1:
             current = self._require(record_id).state.value
             raise InvalidStateTransitionError(
