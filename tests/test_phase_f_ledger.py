@@ -22,9 +22,10 @@ from pathlib import Path
 import pytest
 
 from stele.containment.result import SandboxResult
-from stele.ledger.hashing import build_manifest, sha256_file, sha256_manifest
+from stele.ledger.hashing import UnsafeFileError, build_manifest, sha256_file, sha256_manifest
 from stele.ledger.models import ArtifactState
 from stele.ledger.store import (
+    ArtifactDriftError,
     DuplicateArtifactError,
     InvalidStateTransitionError,
     LedgerStore,
@@ -151,6 +152,38 @@ class TestDeterministicHash:
         b.write_text("content B")
         assert sha256_file(a) != sha256_file(b)
 
+    def test_file_hash_rejects_symlink(self, tmp_path: Path) -> None:
+        target = tmp_path / "target.txt"
+        target.write_text("host content")
+        link = tmp_path / "artifact.txt"
+        link.symlink_to(target)
+
+        with pytest.raises(UnsafeFileError, match="not a regular file"):
+            sha256_file(link)
+
+    def test_manifest_rejects_dotdot_escape(
+        self, artifact_dir: Path, tmp_path: Path
+    ) -> None:
+        outside = tmp_path / "outside.txt"
+        outside.write_text("host content")
+        escaped = artifact_dir / ".." / "outside.txt"
+
+        with pytest.raises(ValueError, match="unsafe path"):
+            build_manifest(artifact_dir, [escaped])
+
+    def test_manifest_rejects_symlinked_parent_directory(
+        self, artifact_dir: Path, tmp_path: Path
+    ) -> None:
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        secret = outside_dir / "secret.txt"
+        secret.write_text("host content")
+        linked = artifact_dir / "linked"
+        linked.symlink_to(outside_dir, target_is_directory=True)
+
+        with pytest.raises(UnsafeFileError, match="directory component"):
+            build_manifest(artifact_dir, [linked / "secret.txt"])
+
     def test_manifest_hash_is_order_independent(self, artifact_dir: Path) -> None:
         """Two manifests with the same entries in different dict order hash identically."""
         p1 = _write_artifact(artifact_dir, "a.txt", "alpha")
@@ -215,6 +248,20 @@ class TestCommit:
         store.commit(record.record_id)
         refetched = store.get(record.record_id)
         assert refetched.state is ArtifactState.COMMITTED
+
+    def test_changed_pending_artifact_cannot_commit(
+        self, store: LedgerStore, artifact_dir: Path
+    ) -> None:
+        p = _write_artifact(artifact_dir, "r.json", "before")
+        record = store.create_pending(
+            run_id=str(uuid.uuid4()), artifact_dir=artifact_dir, artifact_paths=[p]
+        )
+        p.write_text("after")
+
+        with pytest.raises(ArtifactDriftError, match="changed after pending"):
+            store.commit(record.record_id)
+
+        assert store.get(record.record_id).state is ArtifactState.PENDING
 
     def test_commit_already_committed_raises(
         self, store: LedgerStore, artifact_dir: Path

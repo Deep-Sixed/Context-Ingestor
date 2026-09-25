@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .hashing import build_manifest, sha256_file, sha256_manifest
+from .hashing import UnsafeFileError, build_manifest, sha256_manifest
 from .models import ArtifactRecord, ArtifactState
 
 
@@ -50,6 +50,10 @@ class InvalidStateTransitionError(Exception):
 
 class MissingArtifactError(Exception):
     """Raised when an artifact file is absent at commit time."""
+
+
+class ArtifactDriftError(Exception):
+    """Raised when a pending artifact changed or became unsafe before commit."""
 
 
 def _now_iso() -> str:
@@ -173,16 +177,26 @@ class LedgerStore:
                 f"(must be 'pending')"
             )
 
-        # Re-verify files exist — guards against race where artifact_dir is
-        # cleaned up between create_pending and commit.
+        # Re-hash the exact pending bundle before commit. This detects deletion,
+        # content drift, and replacement with a symlink/non-regular file.
         artifact_dir = Path(record.artifact_dir)
-        for rel_path in record.artifact_manifest:
-            full = artifact_dir / rel_path
-            if not full.exists():
-                raise MissingArtifactError(
-                    f"artifact file missing at commit time: {full} — "
-                    "cannot commit; call fail() instead"
-                )
+        artifact_paths = [artifact_dir / rel_path for rel_path in record.artifact_manifest]
+        try:
+            current_manifest = build_manifest(artifact_dir, artifact_paths)
+        except FileNotFoundError as exc:
+            raise MissingArtifactError(
+                f"artifact file missing at commit time: {exc.filename} — "
+                "cannot commit; call fail() instead"
+            ) from exc
+        except (UnsafeFileError, ValueError) as exc:
+            raise ArtifactDriftError(
+                f"artifact bundle became unsafe before commit: {exc}"
+            ) from exc
+
+        if current_manifest != record.artifact_manifest:
+            raise ArtifactDriftError(
+                "artifact bundle changed after pending record was created — cannot commit"
+            )
 
         self._conn.execute(
             "UPDATE artifact_records SET state='committed', finalized_at=? "

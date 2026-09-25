@@ -73,13 +73,13 @@ artifact ledger.  Join on `record_id` if a combined view is needed.
 
 | Phase | Tests |
 |-------|-------|
-| E — Containment | 15 |
-| F — Ledger | 23 |
-| G — Replay / Invalidation | 22 |
+| E — Containment | 23 |
+| F — Ledger | 27 |
+| G — Replay / Invalidation | 24 |
 | H — Adapter Contract | 25 |
-| **Total** | **85** |
+| **Total** | **99** |
 
-All 85 pass.
+All 99 pass.
 
 ---
 

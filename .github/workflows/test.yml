@@ -1,0 +1,26 @@
+name: Stele CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install containment dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apparmor-profiles apparmor-utils bubblewrap python3-pytest
+          sudo install -m 0644             /usr/share/apparmor/extra-profiles/bwrap-userns-restrict             /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+      - name: Prove bubblewrap namespace support
+        run: |
+          bwrap             --ro-bind / /             --unshare-user --uid 0 --gid 0             --unshare-net             -- /usr/bin/true
+      - name: Run Stele suite
+        run: /usr/bin/python3 -m pytest tests -q

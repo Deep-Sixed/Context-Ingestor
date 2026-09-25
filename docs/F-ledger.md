@@ -48,7 +48,7 @@ TBD: whether to co-locate on `graphify-core-db` or a standalone Stele DB.
 - `stele/ledger/hashing.py` — `sha256_file`, `sha256_manifest`, `build_manifest`
 - `stele/ledger/store.py` — `LedgerStore` (SQLite, WAL mode)
 - `stele/ledger/transaction.py` — `ledger_transaction` context manager
-- `tests/test_phase_f_ledger.py` — 23 tests, all passing
+- `tests/test_phase_f_ledger.py` — 27 tests, all passing
 
 ## Completion criteria
 
@@ -58,4 +58,6 @@ TBD: whether to co-locate on `graphify-core-db` or a standalone Stele DB.
 - [x] Round-trip test: create_pending → commit → verify COMMITTED
 - [x] Failure path: exception inside ledger_transaction → state FAILED
 - [x] Missing artifact blocked at create_pending and at commit
+- [x] Artifact hashing stays beneath `artifact_dir`; dot-dot traversal and symlinked parent components are refused
+- [x] PENDING → COMMITTED re-hashes the complete manifest and refuses drift
 - [x] Duplicate artifact_hash: raise (default) or ignore (idempotent)

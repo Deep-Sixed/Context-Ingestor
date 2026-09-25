@@ -43,12 +43,12 @@ Given a `run_id` or `source_hash`:
 - `stele/replay/invalidation.py` — single, by-source-hash, and auto-invalidate-drifted
 - `stele/replay/views.py` — `LedgerViews`: all / pending / committed / invalidated_or_failed
 - `stele/ledger/store.py` — extended with `invalidate()` and `list_by_states()`
-- `tests/test_phase_g_replay.py` — 22 tests, all passing
+- `tests/test_phase_g_replay.py` — 24 tests, all passing
 
 ## Completion criteria
 
 - [x] Replay plan selects committed records, validates against filesystem
-- [x] Drift detection (content changed) → status "drift"
+- [x] Drift detection (content changed, final symlink, or symlinked parent substitution) → status "drift"
 - [x] Missing detection (file deleted) → status "missing"; takes priority over drift
 - [x] Invalidation: single record, bulk by source_hash, auto-invalidate-drifted
 - [x] Invalidated records excluded from default replay plan

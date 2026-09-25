@@ -20,7 +20,7 @@ production paths and no network access.
 
 ## Inputs allowed inside sandbox
 
-- designated input staging path (read-only)
+- designated regular input file, copied first into a private Stele-owned staging directory and then mounted read-only
 - model weights / cache (read-only, bind-mounted)
 - temp scratch space (ephemeral, not persisted)
 
@@ -32,11 +32,16 @@ production paths and no network access.
 ## Implementation
 
 - `stele/containment/sandbox.py` — `BubblewrapSandbox.build_argv()`, `SandboxConfig`
+- `stele/containment/staging.py` — `lstat` + `O_NOFOLLOW` trusted input staging; hashes the same descriptor it copies
+- `stele/containment/artifacts.py` — post-sandbox `lstat` collection; rejects symlink and non-regular parser outputs
 - `stele/containment/runner.py` — `run_in_sandbox()`, CLI entry point
 - `stele/containment/result.py` — `SandboxResult`
-- `tests/test_phase_e_containment.py` — 14 tests, all passing
+- `tests/test_phase_e_containment.py` — 16 live/structural containment tests
+- `tests/test_input_staging.py` — 4 trusted-input staging regression tests
+- `tests/test_artifact_boundary.py` — 3 trusted-output artifact regressions
 
-Python binary inside sandbox: `/usr/bin/python3.14`  
+Python binary inside sandbox: selected by the caller; tests use `sys.executable` (CI invokes `/usr/bin/python3`)  
+User namespace: unshared (`--unshare-user`, uid/gid 0 inside namespace only)  
 Network namespace: unshared (`--unshare-net`)  
 Ephemeral mounts: `/tmp`, `/home`, `/mnt`, `/root`, `/run`, `/var`  
 Writable path: `/stele/output` only (bind-mounted from `artifact_dir`)
@@ -47,4 +52,7 @@ Writable path: `/stele/output` only (bind-mounted from `artifact_dir`)
 - [x] parser invocation tested with fake parser inside sandbox
 - [x] confirmed: no writes outside staging path during parser run
 - [x] confirmed: network blocked inside sandbox
+- [x] untrusted input symlinks/non-regular files refused before sandbox bind; copied and hashed from one `O_NOFOLLOW` descriptor
+- [x] parser-created symlink/non-regular output refused before it can reach the ledger
+- [x] network namespace proof sees only loopback inside the parser sandbox
 - [x] Phase F staging path: `artifact_dir` (caller-supplied); ledger schema TBD in Phase F
