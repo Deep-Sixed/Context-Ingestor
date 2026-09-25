@@ -66,6 +66,12 @@ timeout, out of memory, CPU limit, blocked syscall, Wasm trap, crash, exit
 status, engine error or unsafe output. A failed or killed run leaves no
 output, staging copy, process or container behind. See `docs/E-containment.md`.
 
+**ChatGPT export adapter:** `stele.adapters.ChatGPTExportAdapter` turns the
+Wasm splitter's sealed output into one chunk per message on every conversation
+branch, not only the branch the UI showed. It reads one conversation at a time
+from the archive. Parent links and branch metadata let a target rebuild each
+branch. See `docs/H-adapter.md`.
+
 ## Gate
 
 **RAG-ANYTHING: PROCEED — Stele-gated ingestion with scoped tombstone support.**
