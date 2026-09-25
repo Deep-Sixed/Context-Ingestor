@@ -1,5 +1,5 @@
 """
-Stele Phase H — adapter contract.
+Stele contracts — adapter contract.
 
 The SteleAdapter protocol is the only authorized write boundary between
 parser output and downstream storage targets.
@@ -124,7 +124,7 @@ class SteleAdapter(Protocol):
     the chunks to be written.
 
     on_invalidation() is intended to be called when a previously dispatched
-    run_id is invalidated (Phase G).  Implementations must tombstone or remove
+    run_id is invalidated (see replay/).  Implementations must tombstone or remove
     the data they previously wrote to their target store.  NOTE: the
     Dispatcher does not call it yet — callers must invoke it themselves.
     """

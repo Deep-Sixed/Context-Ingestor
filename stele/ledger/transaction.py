@@ -1,5 +1,5 @@
 """
-Stele Phase F — pending → committed / failed protocol.
+Stele ledger — pending → committed / failed protocol.
 
 The ledger_transaction context manager is the canonical way to record a
 sandboxed parse run.  It enforces the four-step invariant:
@@ -15,7 +15,7 @@ Usage::
 
     with ledger_transaction(store, result) as record:
         # record.state is PENDING here
-        # ... downstream adapter writes happen here (Phase H) ...
+        # ... downstream adapter writes happen here (see contracts/) ...
         pass  # clean exit → committed
 
     # record.state is now COMMITTED

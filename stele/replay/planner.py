@@ -1,12 +1,12 @@
 """
-Stele Phase G — replay planner.
+Stele replay — replay planner.
 
 Selects committed ledger records and validates them against the filesystem
 to produce a ReplayPlan.  The plan tells callers which records are clean and
 replayable versus which have drifted or lost their artifact files.
 
 Does NOT re-run parsers — that would be a higher-level orchestration step
-using the adapter contract (Phase H).  Phase G only answers the question:
+using the adapter contract (see contracts/).  This module only answers the question:
 "are these committed artifacts still trustworthy?"
 """
 from __future__ import annotations

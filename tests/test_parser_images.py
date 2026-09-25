@@ -19,7 +19,7 @@ For every parser named in STELE_PARSER_IMAGES:
   - an image without model weights fails cleanly with exit status 3, without
     trying to download anything, and keeps no output.
 
-The containment proofs (tests/test_phase_e_containment.py) run against the
+The containment proofs (tests/test_containment.py) run against the
 same images via STELE_PROOF_IMAGES.
 """
 from __future__ import annotations

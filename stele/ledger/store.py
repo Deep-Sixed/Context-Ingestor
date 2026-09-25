@@ -1,5 +1,5 @@
 """
-Stele Phase F — SQLite-backed artifact ledger store.
+Stele ledger — SQLite-backed artifact ledger store.
 
 Schema is intentionally portable: column names and types map 1:1 to what
 a future Postgres migration would look like.  The backend can be swapped
@@ -302,7 +302,7 @@ class LedgerStore:
 
         INVALIDATED is a terminal state — it cannot be reversed.
         Use this when a previously committed artifact is found to be stale,
-        incorrect, or superseded (Phase G).
+        incorrect, or superseded (see replay/).
         """
         record = self._require(record_id)
 

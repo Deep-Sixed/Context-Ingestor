@@ -1,5 +1,5 @@
 """
-Phase F ledger proof tests.
+Ledger proof tests.
 
 Six required proofs:
 
@@ -11,7 +11,7 @@ Six required proofs:
   PASS 6 — Duplicate artifact hash is idempotent or rejected explicitly
 
 Run:
-    uv run pytest tests/test_phase_f_ledger.py -v
+    uv run pytest tests/test_ledger.py -v
 """
 from __future__ import annotations
 

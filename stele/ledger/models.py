@@ -10,7 +10,7 @@ class ArtifactState(str, Enum):
     PENDING = "pending"       # emitted, hashed, not yet committed downstream
     COMMITTED = "committed"   # downstream write confirmed
     FAILED = "failed"         # parser failed or commit failed — never becomes committed
-    INVALIDATED = "invalidated"  # Phase G: retroactively invalidated
+    INVALIDATED = "invalidated"  # retroactively invalidated via replay/
 
 
 @dataclass(frozen=True)

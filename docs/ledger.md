@@ -1,8 +1,4 @@
-# Phase F — Deterministic Artifact/Chunk Ledger
-
-**Status:** COMPLETE — 2026-06-26  
-**Depends on:** Phase E  
-**Unblocks:** Phase G
+# Artifact Ledger
 
 ## Goal
 
@@ -36,7 +32,7 @@ when a deployment needs a shared, multi-writer ledger.
 
 ## Commit protocol
 
-1. Parser runs inside Phase E sandbox → produces artifact bundle in staging
+1. Parser runs inside sandbox → produces artifact bundle in staging
 2. Ledger record inserted with `status = pending`
 3. Downstream adapter reads artifact from staging via ledger `run_id`
 4. Dispatcher writes the adapter's chunks to the target store
@@ -49,7 +45,7 @@ when a deployment needs a shared, multi-writer ledger.
 - `stele/ledger/hashing.py` — `sha256_file`, `sha256_manifest`, `build_manifest`
 - `stele/ledger/store.py` — `LedgerStore` (SQLite, WAL mode)
 - `stele/ledger/transaction.py` — `ledger_transaction` context manager
-- `tests/test_phase_f_ledger.py` — 27 tests, all passing
+- `tests/test_ledger.py`
 
 ## Completion criteria
 

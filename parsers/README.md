@@ -121,5 +121,5 @@ The `parser-images` workflow builds each image and runs
 `tests/test_parser_images.py` (representative documents parse end to end,
 output layout, identity, a missing model fails cleanly with status 3, the
 memory and time limits end runs cleanly with nothing kept) and the
-Phase E containment proofs against the image (`STELE_PROOF_IMAGES`).
+containment proofs against the image (`STELE_PROOF_IMAGES`).
 The fixtures come from `tests/fixtures/documents/make_fixtures.py`.

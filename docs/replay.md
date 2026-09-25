@@ -1,12 +1,8 @@
-# Phase G — Replay + Invalidation View
-
-**Status:** COMPLETE — 2026-06-26  
-**Depends on:** Phase F  
-**Unblocks:** Phase H
+# Replay and Invalidation
 
 ## Goal
 
-Any ingestion run recorded in the Phase F ledger must be replayable and
+Any ingestion run recorded in the ledger must be replayable and
 invalidatable. This gives downstream consumers confidence that artifacts have
 a known, recoverable provenance.
 
@@ -15,7 +11,7 @@ a known, recoverable provenance.
 Given a `run_id`:
 1. Locate ledger record
 2. Verify `source_hash` against current input file (detect if source changed)
-3. Re-execute parser in Phase E sandbox with same `parser_config`
+3. Re-execute parser in sandbox with same `parser_config`
 4. Compare new `artifact_hash` against ledger; flag if diverged
 5. If match: promote to `committed` (idempotent replay)
 6. If diverged: create new `run_id`, leave original intact
@@ -43,7 +39,7 @@ Given a `run_id` or `source_hash`:
 - `stele/replay/invalidation.py` — single, by-source-hash, and auto-invalidate-drifted
 - `stele/replay/views.py` — `LedgerViews`: all / pending / committed / invalidated_or_failed
 - `stele/ledger/store.py` — extended with `invalidate()` and `list_by_states()`
-- `tests/test_phase_g_replay.py` — 24 tests, all passing
+- `tests/test_replay.py`
 
 ## Completion criteria
 

@@ -1,5 +1,5 @@
 """
-Stele Phase H — write dispatcher.
+Stele contracts — write dispatcher.
 
 The Dispatcher is the sole authorized path from adapter output to target stores.
 It enforces the adapter contract, validates chunks, and records every write
@@ -33,7 +33,7 @@ class TargetWriter(Protocol):
     """Stub interface for target write implementations.
 
     Real implementations will write to LightRAG, Hindsight, etc.
-    For Phase H these are test doubles — the contract is proven against stubs.
+    In the tests these are test doubles — the contract is proven against stubs.
     Adapters never see or hold a TargetWriter reference.
     """
 

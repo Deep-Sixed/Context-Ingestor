@@ -106,16 +106,16 @@ See [parsers/README.md](parsers/README.md).
 | Tamper-evident artifacts | Hashes are computed on the host from no-follow opens and re-verified at commit and replay |
 | Adapter isolation | **Contract only.** Adapters run in-process as trusted code. Only parsers are sandboxed. |
 
-Details and known limits: [docs/E-containment.md](docs/E-containment.md).
+Details and known limits: [docs/containment.md](docs/containment.md).
 
 ## Documentation
 
 | Doc | Covers |
 |-----|--------|
-| [E — Containment](docs/E-containment.md) | Sandbox backends, seccomp, Landlock, OCI and Wasm details |
-| [F — Ledger](docs/F-ledger.md) | Record fields, pending → committed protocol |
-| [G — Replay](docs/G-replay.md) | Drift detection, invalidation, ledger views |
-| [H — Adapter contract](docs/H-adapter.md) | `SteleAdapter`, `Dispatcher`, `TargetWriter` |
+| [Containment](docs/containment.md) | Sandbox backends, seccomp, Landlock, OCI and Wasm details |
+| [Ledger](docs/ledger.md) | Record fields, pending → committed protocol |
+| [Replay](docs/replay.md) | Drift detection, invalidation, ledger views |
+| [Adapter contract](docs/adapter.md) | `SteleAdapter`, `Dispatcher`, `TargetWriter` |
 | [Evidence store](docs/archive.md) | Content-addressed Snapshot and artifact archive |
 | [Cloud sandboxes](docs/cloud-sandboxes.md) | Design note for hosted sandbox backends (not implemented) |
 | [Parser images](parsers/README.md) | Building and running MinerU, Marker, Docling |
@@ -132,6 +132,6 @@ stele/
 ├── extractors/    deterministic Wasm extractors
 └── parsers/       packaged ML parsers in pinned images
 parsers/           parser image build files (MinerU, Marker, Docling)
-docs/              design and phase docs
+docs/              design docs
 tests/
 ```

@@ -1,5 +1,5 @@
 """
-Phase E containment proof tests.
+Containment proof tests.
 
 These four tests prove the four required properties:
 
@@ -9,7 +9,7 @@ These four tests prove the four required properties:
   PASS 4 — Sandbox failure / ephemeral writes do not produce committed artifacts.
 
 Run with:
-    uv run pytest tests/test_phase_e_containment.py -v
+    uv run pytest tests/test_containment.py -v
 """
 from __future__ import annotations
 
@@ -240,7 +240,7 @@ class TestNoDurableWriteOutsideArtifactDir:
         result = run_in_sandbox(config)
         assert not result.succeeded
         assert not result.produced_artifacts, (
-            "a crashing parser left artifacts — Phase F must never commit these"
+            "a crashing parser left artifacts — the ledger must never commit these"
         )
 
 

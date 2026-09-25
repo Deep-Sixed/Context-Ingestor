@@ -1,5 +1,5 @@
 """
-Phase H adapter contract proof tests.
+Adapter contract proof tests.
 
 Seven required proofs:
 
@@ -12,7 +12,7 @@ Seven required proofs:
   PASS 7 — Dispatcher records target write success/failure separately
 
 Run:
-    uv run pytest tests/test_phase_h_adapter_contract.py -v
+    uv run pytest tests/test_adapter_contract.py -v
 """
 from __future__ import annotations
 

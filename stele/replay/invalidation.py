@@ -1,8 +1,8 @@
 """
-Stele Phase G — invalidation operations.
+Stele replay — invalidation operations.
 
 Invalidation marks committed (or pending) records as INVALIDATED so that
-Phase H adapters know to remove or tombstone the corresponding data from
+adapters know to remove or tombstone the corresponding data from
 their target stores.
 
 Invalidation is non-destructive: the ledger record and its metadata are

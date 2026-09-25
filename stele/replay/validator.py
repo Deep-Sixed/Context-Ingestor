@@ -1,5 +1,5 @@
 """
-Stele Phase G — artifact validator.
+Stele replay — artifact validator.
 
 Validates a single committed ArtifactRecord against the filesystem by
 re-hashing every file in its manifest and comparing to the ledger.
