@@ -7,7 +7,15 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
+# Run in the background so the session starts without waiting; bwrap and the
+# venv may not be ready for the first minute or so of a fresh container.
+echo '{"async": true, "asyncTimeout": 300000}'
+
 cd "$CLAUDE_PROJECT_DIR"
+
+# Written up front so the session picks up the venv PATH even while the
+# install below is still running.
+echo "export PATH=\"$CLAUDE_PROJECT_DIR/.venv/bin:\$PATH\"" >> "$CLAUDE_ENV_FILE"
 
 if ! command -v bwrap >/dev/null || ! command -v socat >/dev/null; then
   apt-get install -y bubblewrap socat >/dev/null 2>&1 \
@@ -23,5 +31,3 @@ if [ ! -x .venv/bin/python ]; then
   /usr/bin/python3.12 -m venv .venv
 fi
 .venv/bin/pip install --quiet -e '.[dev]'
-
-echo "export PATH=\"$CLAUDE_PROJECT_DIR/.venv/bin:\$PATH\"" >> "$CLAUDE_ENV_FILE"
