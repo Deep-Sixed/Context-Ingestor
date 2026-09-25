@@ -7,6 +7,12 @@ already-open parent), checked to be the object that was inspected, and copied
 from that exact open descriptor into a private Stele-owned staging directory.
 The SHA-256 digest is computed from the same bytes that are copied, closing the
 check/open/hash race at the containment boundary.
+
+Windows has no O_NOFOLLOW. There a single file is lstat-checked (symlinks and
+every other reparse point are refused), opened normally, and accepted only if
+the opened file has the same volume and file index as the one checked, so a
+link swapped in between is still refused. Directory inputs need os.fwalk and
+O_NOFOLLOW and are refused on Windows.
 """
 from __future__ import annotations
 
@@ -17,7 +23,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from ..ledger.hashing import sha256_manifest
+from ..ledger.hashing import _is_link_or_reparse_point, sha256_manifest
+
+# True where files can be opened without following a final symlink (Linux,
+# macOS). False on Windows, which uses the identity-checked fallback above.
+RACE_FREE_NOFOLLOW = hasattr(os, "O_NOFOLLOW")
+
+# os.open defaults to text mode on Windows, which would translate line endings.
+_BINARY = getattr(os, "O_BINARY", 0)
 
 
 class InputStagingError(ValueError):
@@ -36,12 +49,11 @@ class StagedInput:
 
 
 def _open_flags() -> int:
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise InputStagingError("secure input staging requires O_NOFOLLOW")
     # O_NONBLOCK keeps a FIFO swapped in after lstat from blocking the open;
     # the fstat check then rejects it.
-    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
+    flags = os.O_RDONLY | _BINARY | getattr(os, "O_NONBLOCK", 0)
+    if RACE_FREE_NOFOLLOW:
+        flags |= os.O_NOFOLLOW
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     return flags
@@ -54,6 +66,10 @@ def _copy_verified(fd: int, observed: os.stat_result, label: str, destination: P
         raise InputStagingError(f"opened input is not a regular file: {label}")
     if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
         raise InputStagingError(f"input changed while being opened: {label}")
+    if not RACE_FREE_NOFOLLOW and opened.st_ino == 0:
+        # Without O_NOFOLLOW the identity check is the only defence against a
+        # swapped-in link; a filesystem without file indexes cannot pass it.
+        raise InputStagingError(f"cannot verify input identity (no file index): {label}")
 
     digest = hashlib.sha256()
     with os.fdopen(fd, "rb", closefd=False) as src, destination.open("xb") as dst:
@@ -80,7 +96,7 @@ def stage_regular_file(source: Path, staging_dir: Path) -> StagedInput:
     except OSError as exc:
         raise InputStagingError(f"cannot inspect input {source}: {exc}") from exc
 
-    if not stat.S_ISREG(observed.st_mode):
+    if not stat.S_ISREG(observed.st_mode) or _is_link_or_reparse_point(observed):
         raise InputStagingError(f"input is not a regular file: {source}")
 
     flags = _open_flags()
@@ -110,8 +126,8 @@ def stage_directory(source: Path, staging_dir: Path) -> StagedInput:
     source = Path(source)
     staging_dir = Path(staging_dir)
     flags = _open_flags()
-    if not hasattr(os, "fwalk"):
-        raise InputStagingError("secure directory staging requires os.fwalk")
+    if not hasattr(os, "fwalk") or not RACE_FREE_NOFOLLOW:
+        raise InputStagingError("secure directory staging requires os.fwalk and O_NOFOLLOW")
 
     try:
         root_stat = os.lstat(source)

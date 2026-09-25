@@ -10,7 +10,10 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# Wasm/WASI sandbox backend (stele.containment.wasm). The API used (fuel,
+# epoch interruption, read-only preopens via fs_mutable) needs wasmtime 49+.
+wasm = ["wasmtime>=49"]
+dev = ["pytest>=8", "wasmtime>=49"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["stele"]

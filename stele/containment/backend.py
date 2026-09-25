@@ -1,11 +1,18 @@
 """
 Sandbox backends and capability matching (roadmap #5).
 
-A backend is one isolation technology (bubblewrap, OCI containers; Wasm/WASI
-later). Each backend declares the guarantees it enforces and the
+A backend is one isolation technology (bubblewrap, Wasmtime and OCI
+containers today). Each backend declares the guarantees it enforces and the
 workloads it can host. Each parser declares its requirements. Stele runs a
 parser only on a backend that satisfies every requirement and never falls back
 to unsandboxed execution.
+
+Every parser is exactly one kind of workload: a host process (config.command
+is an executable run in the sandbox, the default) or a WebAssembly module
+(config.command[0] is a .wasm/.wat file, ParserRequirements.wasm_module=True).
+The workload kind is a required capability like any other, so a Python-script
+parser can never be routed to the Wasm backend and a Wasm module can never be
+routed to bubblewrap, whatever the registry order.
 
 Parsers cannot request network access: there is deliberately no requirement or
 capability for it. Model weights and other dependencies are fetched in a
@@ -14,13 +21,16 @@ separate trusted acquisition step and mounted read-only; parsers run offline.
 from __future__ import annotations
 
 import enum
+import os
 import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-from .sandbox import BubblewrapSandbox, SandboxConfig
+from . import landlock, seccomp
+from .sandbox import BubblewrapSandbox, LandlockLaunch, SandboxConfig
 
 
 class Capability(enum.Enum):
@@ -34,6 +44,8 @@ class Capability(enum.Enum):
     DETERMINISTIC = "deterministic"                # fixed clock/entropy; same input -> same output
 
     # Hostable workloads
+    HOST_PROCESS = "host_process"                  # runs a host executable as config.command
+    WASM_MODULE = "wasm_module"                    # runs a WebAssembly/WASI module
     GPU = "gpu"                                    # GPU devices passed through
     NATIVE_LIBS = "native_libs"                    # arbitrary native code (C extensions, PyTorch)
 
@@ -56,9 +68,12 @@ class ParserRequirements:
     requires_gpu: bool = False
     requires_native_libs: bool = False
     deterministic: bool = False
+    # The parser is a WebAssembly module rather than a host executable.
+    wasm_module: bool = False
 
     def required_capabilities(self) -> frozenset[Capability]:
         needed = set(BASELINE_CAPABILITIES)
+        needed.add(Capability.WASM_MODULE if self.wasm_module else Capability.HOST_PROCESS)
         if self.requires_gpu:
             needed.add(Capability.GPU)
         if self.requires_native_libs:
@@ -95,6 +110,18 @@ class ExecutionOutcome:
     # Content digest of the container image that ran, for backends that run
     # images (part of the parser's identity, roadmap #12); None otherwise.
     image_digest: str | None = None
+    # SHA-256 of the executed WebAssembly module binary, part of the parser's
+    # identity. None for host-process backends.
+    module_sha256: str | None = None
+    # Kernel hardening layers applied to this run, e.g. ("seccomp", "landlock").
+    hardening: tuple[str, ...] = ()
+    # Set when the parser was stopped for breaking sandbox policy.
+    violation: str | None = None
+
+
+SECCOMP_VIOLATION = (
+    "seccomp: the parser made a blocked system call and was killed (SIGSYS)"
+)
 
 
 class SandboxBackend(ABC):
@@ -133,14 +160,37 @@ class BubblewrapBackend(SandboxBackend):
         self._sandbox = BubblewrapSandbox()
 
     def capabilities(self) -> frozenset[Capability]:
-        # No SYSCALL_FILTER until #6 (seccomp), no RESOURCE_LIMITS beyond the
-        # wall-clock timeout, no GPU (devices are not passed into /dev), and
-        # not DETERMINISTIC (real clock and entropy are visible).
-        return frozenset({
+        # SYSCALL_FILTER only where execute() will really install the seccomp
+        # filter. No RESOURCE_LIMITS beyond the wall-clock timeout, no GPU
+        # (devices are not passed into /dev), and not DETERMINISTIC (real
+        # clock and entropy are visible).
+        caps = {
             Capability.FILESYSTEM_ISOLATION,
             Capability.NETWORK_ISOLATION,
+            Capability.HOST_PROCESS,
             Capability.NATIVE_LIBS,
-        })
+        }
+        if self.seccomp_program() is not None:
+            caps.add(Capability.SYSCALL_FILTER)
+        return frozenset(caps)
+
+    def seccomp_program(self) -> bytes | None:
+        """The BPF filter execute() installs, or None on unsupported hosts."""
+        return seccomp.filter_for_host()
+
+    def landlock_launch(self) -> LandlockLaunch | None:
+        """How execute() applies Landlock, or None when it cannot.
+
+        Landlock is defense in depth under the mount namespace, so a kernel
+        without it still runs parsers; the run result's ``hardening`` says
+        whether it was applied.
+        """
+        if landlock.abi_version() < 1:
+            return None
+        python = _sandbox_python()
+        if python is None:
+            return None
+        return LandlockLaunch(python=python, script=landlock.__file__)
 
     def available(self) -> bool:
         # Late import keeps runner.bwrap_available the single patchable probe.
@@ -152,7 +202,26 @@ class BubblewrapBackend(SandboxBackend):
         return BWRAP_MISSING
 
     def execute(self, config: SandboxConfig) -> ExecutionOutcome:
-        argv = self._sandbox.build_argv(config)
+        program = self.seccomp_program()
+        launch = self.landlock_launch()
+        hardening = tuple(
+            name for name, on in (("seccomp", program), ("landlock", launch)) if on
+        )
+        filter_fd = seccomp.filter_fd(program) if program is not None else None
+        try:
+            return self._run(config, filter_fd, launch, hardening)
+        finally:
+            if filter_fd is not None:
+                os.close(filter_fd)
+
+    def _run(
+        self,
+        config: SandboxConfig,
+        filter_fd: int | None,
+        launch: LandlockLaunch | None,
+        hardening: tuple[str, ...],
+    ) -> ExecutionOutcome:
+        argv = self._sandbox.build_argv(config, seccomp_fd=filter_fd, landlock=launch)
         t0 = time.monotonic()
         try:
             proc = subprocess.run(
@@ -161,6 +230,7 @@ class BubblewrapBackend(SandboxBackend):
                 capture_output=True,
                 text=True,
                 timeout=config.timeout_seconds,
+                pass_fds=() if filter_fd is None else (filter_fd,),
             )
         except FileNotFoundError as exc:
             if exc.filename not in (None, argv[0]):
@@ -173,13 +243,34 @@ class BubblewrapBackend(SandboxBackend):
                 stderr=_decode(exc.stderr),
                 wall_time_seconds=time.monotonic() - t0,
                 timed_out=True,
+                hardening=hardening,
             )
+        # bwrap's init reports a signal death as 128 + signo. A parser could
+        # exit with that status on purpose, but that only marks its own run
+        # as failed.
+        violation = None
+        if filter_fd is not None and proc.returncode == 128 + seccomp.SIGSYS:
+            violation = SECCOMP_VIOLATION
         return ExecutionOutcome(
             exit_code=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
             wall_time_seconds=time.monotonic() - t0,
+            hardening=hardening,
+            violation=violation,
         )
+
+
+def _sandbox_python() -> str | None:
+    """An interpreter that exists inside the sandbox, for the launcher.
+
+    Only /usr is bound from the host, so prefer the running interpreter when
+    it lives there (a known-good version), else the system python3.
+    """
+    for candidate in (os.path.realpath(sys.executable), "/usr/bin/python3"):
+        if candidate.startswith("/usr/") and os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def _decode(raw: bytes | str | None) -> str:
@@ -191,17 +282,24 @@ def _decode(raw: bytes | str | None) -> str:
 def default_backends() -> list[SandboxBackend]:
     """Registered backends in preference order.
 
-    bubblewrap comes first: on Linux it needs no daemon, image or privileged
-    engine, and it covers every parser that does not need a GPU or resource
-    limits. The OCI container backend (runc) follows; it is chosen when
-    bubblewrap is unavailable (macOS, Windows, hosts without user namespaces)
-    or lacks a required capability. The GPU variant is last and is only ever
-    chosen for parsers that declare requires_gpu, so no other parser is handed
-    GPU devices. gVisor (runsc) is opt-in and never registered by default.
+    Host-process backends: bubblewrap comes first; on Linux it needs no daemon,
+    image or privileged engine, and it covers every parser that does not need a
+    GPU or resource limits. The OCI container backend (runc) follows; it is
+    chosen when bubblewrap is unavailable (macOS, Windows, hosts without user
+    namespaces) or lacks a required capability. The GPU variant comes last of
+    those and is only ever chosen for parsers that declare requires_gpu, so no
+    other parser is handed GPU devices. gVisor (runsc) is opt-in and never
+    registered by default.
+
+    Wasmtime hosts a disjoint workload (Wasm modules, not host processes), so
+    its position never changes which backend a parser gets: selection is
+    decided by the workload capability, and order only breaks ties between
+    backends hosting the same kind of workload.
     """
     from .oci import OciBackend
+    from .wasm import WasmtimeBackend
 
-    return [BubblewrapBackend(), OciBackend(), OciBackend(gpu=True)]
+    return [BubblewrapBackend(), OciBackend(), OciBackend(gpu=True), WasmtimeBackend()]
 
 
 def select_backend(
@@ -229,8 +327,8 @@ def select_backend(
             continue
         return backend
 
-    if capable_but_unavailable and len(capable_but_unavailable) == len(candidates):
-        # Every backend could satisfy the parser; this host just can't run any.
+    if capable_but_unavailable:
+        # Some backend could satisfy the parser; this host just can't run it.
         raise SandboxUnavailableError(
             " ".join(b.unavailable_reason() for b in capable_but_unavailable)
         )

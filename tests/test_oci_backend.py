@@ -450,7 +450,7 @@ class TestRegistry:
 
     def test_order_and_names(self) -> None:
         names = [b.name for b in backend_module.default_backends()]
-        assert names == ["bubblewrap", "oci-runc", "oci-runc-gpu"]
+        assert names == ["bubblewrap", "oci-runc", "oci-runc-gpu", "wasmtime"]
 
     def test_gpu_parser_goes_to_gpu_variant_only(self, monkeypatch) -> None:
         _fake_engine(monkeypatch, info=dict(DOCKER_INFO, Runtimes={"runc": {}, "nvidia": {}}))

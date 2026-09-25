@@ -291,6 +291,7 @@ class OciBackend(SandboxBackend):
         caps = {
             Capability.FILESYSTEM_ISOLATION,
             Capability.NETWORK_ISOLATION,
+            Capability.HOST_PROCESS,
             Capability.NATIVE_LIBS,
         }
         # A GPU variant hosts GPU workloads unless its runtime rules GPUs out

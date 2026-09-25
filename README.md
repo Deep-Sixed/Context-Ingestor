@@ -69,9 +69,11 @@ ledger.
 ```
 Stele/
 ├── README.md
-├── docs/                   ← phase specs (E–H)
+├── docs/                   ← phase specs (E–H), evidence store (archive.md)
 ├── stele/                  ← Python package
 │   ├── containment/
+│   ├── archive/            ← content-addressed evidence store (#16)
+│   ├── extractors/         ← Wasm extractors (run on the Wasmtime backend)
 │   ├── ledger/
 │   ├── replay/
 │   └── contracts/
