@@ -6,7 +6,9 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 
 class UnsafeFileError(ValueError):
@@ -56,8 +58,14 @@ def _hash_fd(fd: int) -> str:
     return digest.hexdigest()
 
 
-def sha256_file(path: Path) -> str:
-    """Return SHA-256 for one regular file without following the final symlink."""
+@contextmanager
+def open_regular_file(path: Path) -> Iterator[int]:
+    """Open one regular file without following the final symlink; yield its fd.
+
+    The file identity observed by lstat must match the opened descriptor.
+    Callers that need the bytes (not just a hash) read from this descriptor so
+    what they hash and what they copy are the same bytes.
+    """
     path = Path(path)
 
     observed = os.lstat(path)
@@ -78,21 +86,18 @@ def sha256_file(path: Path) -> str:
             raise UnsafeFileError(f"opened artifact is not a regular file: {path}")
         if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
             raise UnsafeFileError(f"artifact changed while being opened: {path}")
-        return _hash_fd(fd)
+        yield fd
     finally:
         os.close(fd)
 
 
-def sha256_file_beneath(root: Path, relative_path: Path) -> str:
-    """Hash a regular file while proving every path component stays under root.
+def sha256_file(path: Path) -> str:
+    """Return SHA-256 for one regular file without following the final symlink."""
+    with open_regular_file(path) as fd:
+        return _hash_fd(fd)
 
-    Every directory component is opened relative to the previously opened
-    directory with O_DIRECTORY and O_NOFOLLOW. The final file is opened with
-    O_NOFOLLOW. Dot-dot traversal and symlinked parent directories are refused.
-    """
-    root = Path(root)
-    relative_path = Path(relative_path)
 
+def _check_relative(relative_path: Path) -> None:
     if relative_path.is_absolute() or not relative_path.parts:
         raise UnsafeFileError(f"artifact path must be relative: {relative_path}")
     if any(part in {"", ".", ".."} for part in relative_path.parts):
@@ -100,8 +105,24 @@ def sha256_file_beneath(root: Path, relative_path: Path) -> str:
             f"artifact path contains unsafe component: {relative_path}"
         )
 
+
+@contextmanager
+def open_regular_file_beneath(root: Path, relative_path: Path) -> Iterator[int]:
+    """Open a regular file while proving every path component stays under root.
+
+    Every directory component is opened relative to the previously opened
+    directory with O_DIRECTORY and O_NOFOLLOW. The final file is opened with
+    O_NOFOLLOW. Dot-dot traversal and symlinked parent directories are refused.
+    Yields the open file descriptor, which is closed on exit.
+    """
+    root = Path(root)
+    relative_path = Path(relative_path)
+    _check_relative(relative_path)
+
     if not RACE_FREE_NOFOLLOW:
-        return _sha256_beneath_by_lstat(root, relative_path)
+        with _open_beneath_by_lstat(root, relative_path) as fd:
+            yield fd
+        return
 
     directory_fds: list[int] = []
     file_fd: int | None = None
@@ -150,7 +171,7 @@ def sha256_file_beneath(root: Path, relative_path: Path) -> str:
             raise UnsafeFileError(
                 f"artifact is not a regular file: {relative_path}"
             )
-        return _hash_fd(file_fd)
+        yield file_fd
     finally:
         if file_fd is not None:
             try:
@@ -164,6 +185,15 @@ def sha256_file_beneath(root: Path, relative_path: Path) -> str:
                 pass
 
 
+def sha256_file_beneath(root: Path, relative_path: Path) -> str:
+    """Hash a regular file while proving every path component stays under root.
+
+    See open_regular_file_beneath for the no-follow guarantees.
+    """
+    with open_regular_file_beneath(root, relative_path) as fd:
+        return _hash_fd(fd)
+
+
 def _is_link_or_reparse_point(st: os.stat_result) -> bool:
     """Symlink, or (on Windows) any reparse point: junctions, mount points,
     app-exec links, cloud placeholders. All of them can redirect an open."""
@@ -172,7 +202,8 @@ def _is_link_or_reparse_point(st: os.stat_result) -> bool:
     )
 
 
-def _sha256_beneath_by_lstat(root: Path, relative_path: Path) -> str:
+@contextmanager
+def _open_beneath_by_lstat(root: Path, relative_path: Path) -> Iterator[int]:
     """Fallback for platforms without O_NOFOLLOW/dir_fd (Windows)."""
     current = root
     for component in (None, *relative_path.parts[:-1]):
@@ -183,18 +214,48 @@ def _sha256_beneath_by_lstat(root: Path, relative_path: Path) -> str:
             raise UnsafeFileError(
                 f"unsafe artifact directory component (link/non-directory): {current}"
             )
-    return sha256_file(root / relative_path)
+    with open_regular_file(root / relative_path) as fd:
+        yield fd
+
+
+def encode_manifest(manifest: dict[str, str]) -> bytes:
+    """Canonical byte encoding of a relative-path to file-hash manifest.
+
+    Entries are sorted by path; each is ``path NUL digest NUL`` in UTF-8. No
+    filesystem path may contain NUL, so the encoding is unambiguous. The
+    archive stores directory snapshots and artifact bundles as exactly these
+    bytes, so a tree object's blob digest equals sha256_manifest().
+    """
+    parts: list[bytes] = []
+    for rel_path in sorted(manifest):
+        parts += [rel_path.encode(), b"\x00", manifest[rel_path].encode(), b"\x00"]
+    return b"".join(parts)
 
 
 def sha256_manifest(manifest: dict[str, str]) -> str:
     """Return a deterministic SHA-256 over a relative-path to file-hash manifest."""
-    h = hashlib.sha256()
-    for rel_path in sorted(manifest):
-        h.update(rel_path.encode())
-        h.update(b"\x00")
-        h.update(manifest[rel_path].encode())
-        h.update(b"\x00")
-    return h.hexdigest()
+    return hashlib.sha256(encode_manifest(manifest)).hexdigest()
+
+
+def artifact_relative_path(artifact_dir: Path, path: Path) -> Path:
+    """Return path relative to artifact_dir, refusing escapes and unsafe parts."""
+    artifact_dir = Path(artifact_dir)
+    path = Path(path)
+    try:
+        relative = path.relative_to(artifact_dir)
+    except ValueError:
+        raise ValueError(
+            f"artifact {path} is outside artifact_dir {artifact_dir} — "
+            "this path did not come through /stele/output"
+        )
+
+    if not relative.parts or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
+        raise ValueError(
+            f"artifact {path} contains an unsafe path relative to {artifact_dir}"
+        )
+    return relative
 
 
 def build_manifest(artifact_dir: Path, artifact_paths: list[Path]) -> dict[str, str]:
@@ -203,21 +264,7 @@ def build_manifest(artifact_dir: Path, artifact_paths: list[Path]) -> dict[str, 
     manifest: dict[str, str] = {}
 
     for path in artifact_paths:
-        path = Path(path)
-        try:
-            relative = path.relative_to(artifact_dir)
-        except ValueError:
-            raise ValueError(
-                f"artifact {path} is outside artifact_dir {artifact_dir} — "
-                "this path did not come through /stele/output"
-            )
-
-        if not relative.parts or any(
-            part in {"", ".", ".."} for part in relative.parts
-        ):
-            raise ValueError(
-                f"artifact {path} contains an unsafe path relative to {artifact_dir}"
-            )
+        relative = artifact_relative_path(artifact_dir, path)
 
         # POSIX separators keep manifests (and artifact_hash) identical across
         # operating systems; on Linux/macOS this is the same as str(relative).
