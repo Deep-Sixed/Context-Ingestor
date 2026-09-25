@@ -532,7 +532,6 @@ def test_version_2_ledger_gains_the_delivery_log(tmp_path: Path) -> None:
     conn.execute("DROP TABLE replays")  # a v2 ledger has neither log
     conn.execute("DROP TABLE delivery_events")
     conn.execute("DROP TABLE deliveries")
-    conn.execute("ALTER TABLE artifact_records DROP COLUMN run_settings")
     conn.execute("PRAGMA user_version = 2")
     conn.commit()
     conn.close()

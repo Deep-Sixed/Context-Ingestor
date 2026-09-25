@@ -459,29 +459,6 @@ def test_catalog_refuses_duplicates() -> None:
     assert catalog.get("chatgpt-export-split", "2") is None
 
 
-def test_version_4_ledger_gains_run_settings(tmp_path: Path) -> None:
-    db = tmp_path / "ledger.db"
-    ledger = open_ledger(db)
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / "a.txt").write_text("a")
-    record = ledger.seal(ledger.create_pending(
-        **PROVENANCE, run_id="run-v4", artifact_dir=out, artifact_paths=[out / "a.txt"],
-    ).record_id)
-    ledger.close()
-    conn = sqlite3.connect(db)
-    conn.execute("ALTER TABLE artifact_records DROP COLUMN run_settings")
-    conn.execute("PRAGMA user_version = 4")
-    conn.commit()
-    conn.close()
-
-    ledger = open_ledger(db)
-    assert ledger.get(record.record_id).run_settings is None
-    conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
-    conn.close()
-
-
 def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     db = tmp_path / "ledger.db"
     open_ledger(db).close()
@@ -489,7 +466,6 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     conn.execute("DROP TRIGGER replays_append_only_u")
     conn.execute("DROP TRIGGER replays_append_only_d")
     conn.execute("DROP TABLE replays")
-    conn.execute("ALTER TABLE artifact_records DROP COLUMN run_settings")
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -497,5 +473,5 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     ledger = open_ledger(db)
     assert ReplayLog(ledger).all() == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
     conn.close()

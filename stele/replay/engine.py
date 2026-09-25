@@ -206,11 +206,6 @@ class _Replay:
         spec = self.catalog.get(parser.name, parser.version)
         if spec is None:
             raise _Unreplayable(f"parser {parser.name} {parser.version} is not in the catalog")
-        if self.record.run_settings is not None and spec.with_run_settings is not None:
-            try:
-                spec = spec.with_run_settings(self.record.run_settings)
-            except (ValueError, TypeError, KeyError) as exc:
-                raise _Unreplayable(f"cannot run the parser with its recorded settings: {exc}") from exc
         if not spec.deterministic and spec.policy is None:
             raise _Unreplayable(
                 f"parser {parser.name} {parser.version} is not deterministic and has no "

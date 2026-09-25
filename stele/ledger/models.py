@@ -84,8 +84,3 @@ class ArtifactRecord:
     # A caller-supplied source hash from a pre-#12 ledger that matched no
     # Snapshot in the archive. Unverified; kept only for audit.
     legacy_source_hash: str | None = None
-
-    # How the parser was run beyond its config (e.g. a packaged parser's
-    # device, CPU and memory limits and timeout), for replay. None when the
-    # recorder gave none, and on records from before schema version 5.
-    run_settings: dict[str, Any] | None = None

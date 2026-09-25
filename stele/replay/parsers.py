@@ -29,8 +29,6 @@ from .policy import ComparisonPolicy
 ConfigBuilder = Callable[[Path | None, Path, Mapping[str, Any]], SandboxConfig]
 # The recorded identity on replay (None on a first run) -> the backend to use.
 BackendFactory = Callable[[ParserIdentity | None], SandboxBackend]
-# A record's run_settings -> the spec that runs the parser with them.
-RunSettingsBinder = Callable[[Mapping[str, Any]], "ParserSpec"]
 
 
 @dataclass(frozen=True)
@@ -47,11 +45,6 @@ class ParserSpec:
     policy: ComparisonPolicy | None = None
     # Explicit backend, e.g. an OciBackend pinned to the recorded image.
     backend: BackendFactory | None = None
-    # For parsers whose runs record run_settings (device, limits, timeout):
-    # returns the spec that runs the parser as a given record was run. Raises
-    # ValueError for settings this spec cannot honour. Replay calls it for
-    # every record that has run_settings.
-    with_run_settings: RunSettingsBinder | None = None
 
     def __post_init__(self) -> None:
         # Validates name and version the same way the ledger does.

@@ -93,7 +93,6 @@ def ledger_transaction(
     parser: ParserIdentity,
     parser_config: Mapping[str, Any],
     source: Source | None = None,
-    run_settings: Mapping[str, Any] | None = None,
 ) -> Generator[ArtifactRecord, None, None]:
     """Context manager wrapping a SandboxResult in a ledger transaction.
 
@@ -137,7 +136,6 @@ def ledger_transaction(
         input_snapshot=sandbox_result.input_snapshot,
         source=source,
         backend=sandbox_result.backend,
-        run_settings=run_settings,
     )
 
     if (
@@ -180,12 +178,10 @@ def record_run(
     parser: ParserIdentity,
     parser_config: Mapping[str, Any],
     source: Source | None = None,
-    run_settings: Mapping[str, Any] | None = None,
 ) -> ArtifactRecord:
     """Record one run and seal it; return the SEALED record."""
     with ledger_transaction(
-        store, sandbox_result, parser=parser, parser_config=parser_config, source=source,
-        run_settings=run_settings,
+        store, sandbox_result, parser=parser, parser_config=parser_config, source=source
     ) as record:
         pass
     return store.get(record.record_id)
