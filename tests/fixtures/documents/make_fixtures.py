@@ -74,6 +74,12 @@ def _scanned(path: Path) -> None:
 
 
 def _tables(path: Path) -> None:
+    """A report page: prose, a captioned table with a plain grid, more prose.
+
+    Kept deliberately page-like: a lone shaded grid on an otherwise empty page
+    is classified as a picture by some layout models (Docling), which is not
+    what this fixture is meant to test.
+    """
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet
@@ -86,16 +92,23 @@ def _tables(path: Path) -> None:
         ["Gadgets", "120", "95", "180", "395"],
         ["Gizmos", "80", "82", "90", "252"],
     ]
-    table = Table(data)
+    table = Table(data, colWidths=[120, 70, 70, 70, 90])
     table.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
     ]))
     story = [
         Paragraph("Quarterly results", styles["Title"]),
-        Paragraph("Units sold per quarter and total revenue.", styles["BodyText"]),
+        Paragraph(LOREM * 2, styles["BodyText"]),
+        Paragraph("Units sold per quarter and total revenue are shown in Table 1.",
+                  styles["BodyText"]),
         Spacer(1, 12),
         table,
+        Spacer(1, 6),
+        Paragraph("Table 1: Units sold per quarter and total revenue.", styles["Italic"]),
+        Spacer(1, 12),
+        Paragraph(LOREM * 3, styles["BodyText"]),
     ]
     SimpleDocTemplate(str(path), pagesize=letter, title="tables", author="Stele",
                       invariant=1).build(story)
