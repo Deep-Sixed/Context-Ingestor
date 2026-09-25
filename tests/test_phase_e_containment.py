@@ -32,6 +32,13 @@ requires_bwrap = pytest.mark.skipif(
 )
 
 
+
+
+def live_proof(cls):
+    """Run a live containment proof once per registered sandbox backend."""
+    return pytest.mark.usefixtures("containment_backend")(requires_bwrap(cls))
+
+
 def _config(script: str, artifact_dir: Path, **kwargs) -> SandboxConfig:
     return SandboxConfig(
         command=[PYTHON, SANDBOX_SCRIPT := "/stele/parser"],
@@ -45,7 +52,7 @@ def _config(script: str, artifact_dir: Path, **kwargs) -> SandboxConfig:
 # PASS 1 — Allowed artifact emitted
 # ---------------------------------------------------------------------------
 
-@requires_bwrap
+@live_proof
 class TestAllowedArtifact:
     """Parser runs inside bubblewrap and its output reaches the host via artifact_dir."""
 
@@ -84,7 +91,7 @@ class TestAllowedArtifact:
 # PASS 2 — Forbidden writes blocked
 # ---------------------------------------------------------------------------
 
-@requires_bwrap
+@live_proof
 class TestForbiddenWrites:
     """Parser cannot write outside /stele/output — attempts raise OSError inside sandbox."""
 
@@ -138,7 +145,7 @@ class TestForbiddenWrites:
 # NETWORK — isolated namespace exposes no host network interfaces
 # ---------------------------------------------------------------------------
 
-@requires_bwrap
+@live_proof
 class TestNetworkIsolation:
 
     def test_only_loopback_interface_visible(self, tmp_path: Path) -> None:
@@ -157,7 +164,7 @@ class TestNetworkIsolation:
 # PASS 3 — Exit status, stdout, stderr captured
 # ---------------------------------------------------------------------------
 
-@requires_bwrap
+@live_proof
 class TestExitStatusCapture:
     """Exit code, stdout, and stderr are faithfully captured regardless of value."""
 
@@ -197,7 +204,7 @@ class TestExitStatusCapture:
 # PASS 4 — No durable write path reachable from parser
 # ---------------------------------------------------------------------------
 
-@requires_bwrap
+@live_proof
 class TestNoDurableWriteOutsideArtifactDir:
     """
     A parser that writes ONLY to /tmp (ephemeral sandbox tmpfs) must leave

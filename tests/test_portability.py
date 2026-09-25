@@ -118,7 +118,7 @@ def test_missing_bubblewrap_reported_before_input_staging(tmp_path: Path, monkey
     def must_not_stage(*args, **kwargs):
         raise AssertionError("input must not be staged when bwrap is missing")
 
-    monkeypatch.setattr(runner_module, "stage_regular_file", must_not_stage)
+    monkeypatch.setattr(runner_module, "stage_input", must_not_stage)
     with pytest.raises(SandboxUnavailableError, match="Linux bubblewrap"):
         run_in_sandbox(SandboxConfig(
             command=["/usr/bin/true"], artifact_dir=tmp_path / "o", input_path=source,

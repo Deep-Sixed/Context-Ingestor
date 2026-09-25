@@ -20,6 +20,12 @@ class SandboxResult:
     artifact_dir: Path
     wall_time_seconds: float
     timed_out: bool = False
+    # SHA-256 of the exact staged input bytes the parser saw (a manifest digest
+    # for directory inputs); None when the run had no input. Computed by
+    # Stele, never supplied by the caller.
+    input_sha256: str | None = None
+    # Name of the sandbox backend that executed the run, e.g. "bubblewrap".
+    backend: str | None = None
 
     @property
     def succeeded(self) -> bool:
