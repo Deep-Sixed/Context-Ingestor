@@ -36,8 +36,8 @@ from .backend import (
     ExecutionOutcome,
     SandboxBackend,
     SandboxUnavailableError,
-    _decode,
 )
+from .capture import DEFAULT_OUTPUT_LIMIT_BYTES, run_bounded
 from .sandbox import (
     _EPHEMERAL_TMPFS,
     SANDBOX_INPUT_DIR,
@@ -176,6 +176,7 @@ class OciBackend(SandboxBackend):
         cpus: float = 2.0,
         pids_limit: int = 512,
         tmpfs_size: str = "256m",
+        output_limit_bytes: int = DEFAULT_OUTPUT_LIMIT_BYTES,
     ) -> None:
         if engine is not None and engine not in ENGINES:
             raise ValueError(f"unsupported container engine {engine!r}; expected one of {ENGINES}")
@@ -187,6 +188,8 @@ class OciBackend(SandboxBackend):
         self.cpus = cpus
         self.pids_limit = pids_limit
         self.tmpfs_size = tmpfs_size
+        # Kept of each of the parser's stdout and stderr; the rest is discarded.
+        self.output_limit_bytes = output_limit_bytes
         self.name = f"oci-{runtime}" + ("-gpu" if gpu else "")
         self._probe: _Probe | None = None
 
@@ -445,19 +448,14 @@ class OciBackend(SandboxBackend):
     ) -> ExecutionOutcome:
         t0 = time.monotonic()
         try:
-            proc = subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=workdir,
-            )
+            # Bounded: the engine CLI relays the parser's output into this
+            # process, outside the container's memory limit.
+            proc = run_bounded(argv, timeout=timeout, limit=self.output_limit_bytes, cwd=workdir)
         except FileNotFoundError as exc:
             if exc.filename not in (None, argv[0]):
                 raise
             raise SandboxUnavailableError(self.unavailable_reason()) from exc
-        except subprocess.TimeoutExpired as exc:
+        if proc.timed_out:
             # Killing the CLI client does not stop the container; remove it,
             # and report the run as stopped only once the engine confirms the
             # container no longer exists.
@@ -468,11 +466,11 @@ class OciBackend(SandboxBackend):
                     f"{container_name} could not be proven removed ({problem}); it may "
                     "still be running and writing to the output directory, which must "
                     "not be used"
-                ) from exc
+                )
             return ExecutionOutcome(
                 exit_code=-1,
-                stdout=_decode(exc.stdout),
-                stderr=_decode(exc.stderr),
+                stdout=proc.stdout,
+                stderr=proc.stderr,
                 wall_time_seconds=time.monotonic() - t0,
                 timed_out=True,
                 image_digest=self.image_digest,

@@ -130,17 +130,19 @@ In each case the record stays `pending` (and `ledger_transaction` marks it
 ## Storage and migration
 
 SQLite in WAL mode, with a schema that maps 1:1 to Postgres. The schema
-version is `PRAGMA user_version` (currently 5: records, the delivery log
-version is `PRAGMA user_version` (currently 6: records, the delivery log
+version is `PRAGMA user_version` (currently 7: records, the delivery log
 added by #13, the replay log added by #14, the `run_conditions` column
-added by #30, and version 6's binding of each delivery to one payload plus
-the `failed` replay outcome). Opening a ledger of an older version migrates
-it in one write transaction (`stele/ledger/migration.py`): either the
-migration completes or the database is left unchanged. Versions 2 → 3 → 4 → 5
-only add the delivery log, the replay log and the `run_conditions` column
-(NULL for existing records: their conditions were never recorded); 5 → 6
-adds the payload-binding trigger and rebuilds the replay log table (to widen
-its outcome check), copying every row unchanged.
+added by #30, version 6's binding of each delivery to one payload plus the
+`failed` replay outcome, and version 7's `attempt_id` on delivery events).
+Opening a ledger of an older version migrates it in one write transaction
+(`stele/ledger/migration.py`): either the migration completes or the
+database is left unchanged. Versions 2 → 3 → 4 → 5 only add the delivery
+log, the replay log and the `run_conditions` column (NULL for existing
+records: their conditions were never recorded); 5 → 6 adds the
+payload-binding trigger and rebuilds the replay log table (to widen its
+outcome check), copying every row unchanged; 6 → 7 adds the `attempt_id`
+column to delivery events (NULL for existing events, which are read one
+attempt at a time, as before).
 
 Migrating a pre-#12 (version 0) ledger:
 
@@ -164,7 +166,7 @@ raises `LedgerSchemaError`.
 - `stele/ledger/hashing.py` — `sha256_file`, `sha256_manifest`, `build_manifest`
 - `stele/ledger/store.py` — `LedgerStore` (SQLite, WAL mode)
 - `stele/ledger/transaction.py` — `ledger_transaction`, `record_run`
-- `stele/ledger/migration.py` — migration from schema versions 0, 2, 3, 4 and 5
+- `stele/ledger/migration.py` — migration from schema versions 0, 2, 3, 4, 5 and 6
 - `stele/ledger/delivery.py` — the delivery log (#13)
 - `tests/test_ledger.py` — state machine, hashing, per-run records
 - `tests/test_ledger_provenance.py` — Snapshot provenance, parser identity, sealing, migration

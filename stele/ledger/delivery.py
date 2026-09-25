@@ -20,9 +20,15 @@ delivery to that payload's chunks_digest; a retry, or a concurrent dispatch of
 the same record to the same target, must present the same payload or it is
 refused before its writer is called (append_intent, backed by a trigger).
 
+Each write attempt has its own attempt_id, carried by its intent and by its
+receipt or failure, so attempts that overlap (two dispatchers delivering the
+same record to the same target) are told apart: one attempt's receipt never
+closes another's intent. Events written before ledger schema 7 have no
+attempt_id and are read as one attempt at a time, as they were written.
+
 A crash at any point therefore leaves a log that bounds what the target
-holds: an intent without an outcome means the target may hold anything from
-none to all of the planned chunks, under that dispatch_id. The log lives in
+holds: an intent without an outcome of its own means the target may hold
+anything from none to all of the planned chunks, under that dispatch_id. The log lives in
 the ledger database, beside the records, and is never updated or deleted.
 """
 from __future__ import annotations
@@ -64,6 +70,9 @@ class DeliveryEvent:
     done: int | None
     error: str | None
     at: datetime
+    # The write attempt an intent, receipt or failure belongs to; None for
+    # removal events and for events written before ledger schema 7.
+    attempt_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,24 +127,37 @@ class Delivery:
     def possibly_written(self) -> bool:
         """True unless the log proves the target holds nothing of this delivery.
 
-        An attempt wrote nothing only if its intent is followed by a failure
-        reporting done == 0. Any receipt, partial or unknown failure, or
-        intent without an outcome (a crash, or a write still running) may
-        have left data. A removal receipt clears what was written before it,
-        but not a write still in flight, which may land after the removal.
+        An attempt wrote nothing only if its intent is followed by its own
+        failure reporting done == 0. Any receipt, partial or unknown failure,
+        or intent without an outcome of its own (a crash, or a write still
+        running) may have left data. A removal receipt clears what was
+        written before it, but not a write still in flight, which may land
+        after the removal.
+
+        Attempts are matched by attempt_id, so one attempt's outcome never
+        closes another's intent. Events from before schema 7 carry none and
+        are read in order, one attempt at a time.
         """
-        written = in_flight = False
+        written = False
+        outstanding: set[str] = set()   # attempts with an intent and no outcome yet
+        legacy_in_flight = False        # the same, for events without an attempt_id
         for e in self.events:
             if e.event == "intent":
-                written = written or in_flight  # an earlier attempt never reported
-                in_flight = True
+                if e.attempt_id is None:
+                    written = written or legacy_in_flight  # an earlier attempt never reported
+                    legacy_in_flight = True
+                else:
+                    outstanding.add(e.attempt_id)
             elif e.event in ("receipt", "failure"):
                 if e.event == "receipt" or e.done != 0:
                     written = True
-                in_flight = False
+                if e.attempt_id is None:
+                    legacy_in_flight = False
+                else:
+                    outstanding.discard(e.attempt_id)
             elif e.event == "removal_receipt":
                 written = False
-        return written or in_flight
+        return written or legacy_in_flight or bool(outstanding)
 
     def explain(self) -> str:
         """What the target holds under this dispatch_id, per the log."""
@@ -144,8 +166,9 @@ class Delivery:
             return "nothing was written"
         if status is DeliveryStatus.DELIVERED:
             return f"all {self.planned} chunks were written"
-        if status is DeliveryStatus.REMOVED:
+        if status is DeliveryStatus.REMOVED and not self.possibly_written:
             return "the delivery's data was removed"
+        # A removal does not cover an attempt still in flight when it ran.
         if not self.possibly_written:
             return "nothing was written"
         return (
@@ -245,27 +268,33 @@ class DeliveryLog:
         chunks_digest: str | None = None,
         done: int | None = None,
         error: str | None = None,
+        attempt_id: str | None = None,
     ) -> None:
-        """Durably append one event (committed before this returns)."""
+        """Durably append one event (committed before this returns).
+
+        A receipt or failure passes the attempt_id its intent was given.
+        """
         try:
             self._conn.execute(
                 "INSERT INTO delivery_events "
-                "(dispatch_id, event, planned, chunks_digest, done, error, at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (dispatch_id, event, planned, chunks_digest, done, error, _now()),
+                "(dispatch_id, event, planned, chunks_digest, done, error, at, attempt_id) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (dispatch_id, event, planned, chunks_digest, done, error, _now(), attempt_id),
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"cannot record {event!r} for {dispatch_id}: {exc}") from exc
 
     def append_intent(self, dispatch_id: str, chunks: list[Any]) -> str:
-        """Durably record the intent to write chunks; return the bound digest.
+        """Durably record the intent to write chunks; return its attempt_id.
 
         In one write transaction: if the delivery already has an intent, the
         chunks must be that intent's payload (else PayloadConflictError and
         nothing is recorded); otherwise this intent binds the delivery to
         them. Two dispatchers racing on one delivery therefore cannot both
         reach their writers with different payloads under its dispatch_id.
+        The attempt's receipt or failure must carry the returned attempt_id.
         """
+        attempt_id = str(uuid4())
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             first = self._conn.execute(
@@ -285,9 +314,9 @@ class DeliveryLog:
             try:
                 self._conn.execute(
                     "INSERT INTO delivery_events "
-                    "(dispatch_id, event, planned, chunks_digest, done, error, at) "
-                    "VALUES (?,'intent',?,?,NULL,NULL,?)",
-                    (dispatch_id, len(chunks), digest, _now()),
+                    "(dispatch_id, event, planned, chunks_digest, done, error, at, attempt_id) "
+                    "VALUES (?,'intent',?,?,NULL,NULL,?,?)",
+                    (dispatch_id, len(chunks), digest, _now(), attempt_id),
                 )
             except sqlite3.IntegrityError as exc:  # the payload-binding trigger
                 raise PayloadConflictError(f"delivery {dispatch_id}: {exc}") from exc
@@ -295,35 +324,16 @@ class DeliveryLog:
             self._conn.execute("ROLLBACK")
             raise
         self._conn.execute("COMMIT")
-        return digest
+        return attempt_id
 
     def append_unwritten_failure(self, dispatch_id: str, error: str) -> None:
         """Record a failure that happened before this attempt's writer was called.
 
-        This attempt wrote nothing, but another dispatch of the same delivery
-        may have an intent outstanding; reporting done=0 after it would claim
-        that write left nothing behind. So done is 0 only when no intent is
-        outstanding, and unknown (NULL) otherwise.
+        The attempt never recorded an intent and wrote nothing, so it gets an
+        attempt_id of its own with done=0. That says nothing about any other
+        attempt of the delivery, whose outstanding intent stays outstanding.
         """
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            last = self._conn.execute(
-                "SELECT event FROM delivery_events WHERE dispatch_id=? "
-                "AND event IN ('intent', 'receipt', 'failure') "
-                "ORDER BY event_id DESC LIMIT 1",
-                (dispatch_id,),
-            ).fetchone()
-            done = None if last is not None and last["event"] == "intent" else 0
-            self._conn.execute(
-                "INSERT INTO delivery_events "
-                "(dispatch_id, event, planned, chunks_digest, done, error, at) "
-                "VALUES (?,'failure',NULL,NULL,?,?,?)",
-                (dispatch_id, done, error, _now()),
-            )
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
+        self.append(dispatch_id, "failure", done=0, error=error, attempt_id=str(uuid4()))
 
     def get(self, dispatch_id: str) -> Delivery:
         row = self._conn.execute(
@@ -366,6 +376,7 @@ class DeliveryLog:
                     done=e["done"],
                     error=e["error"],
                     at=datetime.fromisoformat(e["at"]),
+                    attempt_id=e["attempt_id"],
                 )
                 for e in events
             ),

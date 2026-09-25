@@ -155,13 +155,17 @@ class TestSessionIsolation:
     def test_runner_gives_parser_no_stdin(self, tmp_path: Path, monkeypatch) -> None:
         seen: dict[str, object] = {}
 
-        def fake_run(argv, **kwargs):
-            seen.update(kwargs)
-            return subprocess.CompletedProcess(argv, 0, "", "")
+        class Started(Exception):
+            pass
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        def fake_popen(argv, **kwargs):
+            seen.update(kwargs)
+            raise Started()
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
         monkeypatch.setattr(runner_module, "bwrap_available", lambda: True)
-        run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=tmp_path / "out"))
+        with pytest.raises(Started):
+            run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=tmp_path / "out"))
         assert seen["stdin"] is subprocess.DEVNULL
 
     @requires_bwrap

@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .backend import Capability, ExecutionOutcome, SandboxBackend
+from .capture import DEFAULT_OUTPUT_LIMIT_BYTES, BoundedCapture
 from .sandbox import SANDBOX_INPUT_DIR, SANDBOX_OUTPUT, SandboxConfig
 
 WASMTIME_MISSING = (
@@ -84,7 +85,6 @@ DEFAULT_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
 # Roughly a minute of straight-line Wasm on current hardware; the wall-clock
 # timeout remains the backstop.
 DEFAULT_FUEL = 50_000_000_000
-DEFAULT_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024
 
 _WASI = "wasi_snapshot_preview1"
 
@@ -263,32 +263,6 @@ def _preopens(config: SandboxConfig) -> list[tuple[Path, str, bool]]:
     return preopens
 
 
-class _Capture:
-    """Bounded in-memory capture of a guest output stream."""
-
-    def __init__(self, limit: int) -> None:
-        self.limit = limit
-        self.chunks: list[bytes] = []
-        self.size = 0
-        self.truncated = False
-
-    def __call__(self, data: bytes) -> int:
-        room = self.limit - self.size
-        if room > 0:
-            kept = data[:room]
-            self.chunks.append(kept)
-            self.size += len(kept)
-        if len(data) > max(room, 0):
-            self.truncated = True
-        return len(data)
-
-    def text(self, stream: str) -> str:
-        out = b"".join(self.chunks).decode("utf-8", errors="replace")
-        if self.truncated:
-            out += f"\n[stele: {stream} truncated at {self.limit} bytes]\n"
-        return out
-
-
 class _Run:
     """One execution: fresh engine, store, WASI context and host shims."""
 
@@ -303,8 +277,8 @@ class _Run:
         self.config = config
         self.binary = binary
         self.preopens = preopens
-        self.stdout = _Capture(backend.output_limit_bytes)
-        self.stderr = _Capture(backend.output_limit_bytes)
+        self.stdout = BoundedCapture(backend.output_limit_bytes)
+        self.stderr = BoundedCapture(backend.output_limit_bytes)
         self.clock_ns = 0
         self.entropy = _Entropy(backend.entropy_seed)
         self.inodes: dict[int, int] = {}

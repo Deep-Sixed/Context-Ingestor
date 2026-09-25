@@ -90,7 +90,7 @@ def test_missing_bubblewrap_raises_clear_error(tmp_path: Path, monkeypatch) -> N
     def no_bwrap(argv, **kwargs):
         raise FileNotFoundError(2, "No such file or directory", argv[0])
 
-    monkeypatch.setattr(subprocess, "run", no_bwrap)
+    monkeypatch.setattr(subprocess, "Popen", no_bwrap)
     monkeypatch.setattr(runner_module, "bwrap_available", lambda: True)
     with pytest.raises(SandboxUnavailableError, match="Linux bubblewrap"):
         run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=tmp_path / "o"))
@@ -101,7 +101,7 @@ def test_missing_bubblewrap_on_windows_style_error(tmp_path: Path, monkeypatch) 
     def no_bwrap(argv, **kwargs):
         raise FileNotFoundError(2, "The system cannot find the file specified")
 
-    monkeypatch.setattr(subprocess, "run", no_bwrap)
+    monkeypatch.setattr(subprocess, "Popen", no_bwrap)
     monkeypatch.setattr(runner_module, "bwrap_available", lambda: True)
     with pytest.raises(SandboxUnavailableError):
         run_in_sandbox(SandboxConfig(command=["/usr/bin/true"], artifact_dir=tmp_path / "o"))

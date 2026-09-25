@@ -597,6 +597,7 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     conn = sqlite3.connect(db)
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")
     conn.execute("DROP TRIGGER delivery_events_one_payload")  # added in v6
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added in v7
     conn.execute("PRAGMA user_version = 4")
     conn.commit()
     conn.close()
@@ -607,7 +608,7 @@ def test_version_4_ledger_gains_run_conditions(tmp_path: Path) -> None:
     assert migrated.state is record.state and migrated.artifact_hash == record.artifact_hash
     assert ledger.find_by_parser(record.parser.name, device="cpu") == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
     conn.close()
     assert RunConditions.from_dict(RunConditions(device="gpu", cpus=2).to_dict()).cpus == 2.0
     with pytest.raises(ValueError):
@@ -625,6 +626,7 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     conn.execute("DROP TABLE replays")
     conn.execute("ALTER TABLE artifact_records DROP COLUMN run_conditions")  # added in v5
     conn.execute("DROP TRIGGER delivery_events_one_payload")  # added by version 6
+    conn.execute("ALTER TABLE delivery_events DROP COLUMN attempt_id")  # added by version 7
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -632,5 +634,5 @@ def test_version_3_ledger_gains_the_replay_log(tmp_path: Path) -> None:
     ledger = open_ledger(db)
     assert ReplayLog(ledger).all() == []
     conn = sqlite3.connect(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
     conn.close()

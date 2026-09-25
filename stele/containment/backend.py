@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import enum
 import os
-import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -31,6 +30,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from . import landlock, seccomp
+from .capture import DEFAULT_OUTPUT_LIMIT_BYTES, run_bounded
 from .sandbox import BubblewrapSandbox, LandlockLaunch, SandboxConfig
 
 
@@ -176,8 +176,10 @@ class BubblewrapBackend(SandboxBackend):
 
     name = "bubblewrap"
 
-    def __init__(self) -> None:
+    def __init__(self, *, output_limit_bytes: int = DEFAULT_OUTPUT_LIMIT_BYTES) -> None:
         self._sandbox = BubblewrapSandbox()
+        # Kept of each of the parser's stdout and stderr; the rest is discarded.
+        self.output_limit_bytes = output_limit_bytes
 
     def capabilities(self) -> frozenset[Capability]:
         # SYSCALL_FILTER only where execute() will really install the seccomp
@@ -244,23 +246,23 @@ class BubblewrapBackend(SandboxBackend):
         argv = self._sandbox.build_argv(config, seccomp_fd=filter_fd, landlock=launch)
         t0 = time.monotonic()
         try:
-            proc = subprocess.run(
+            # Bounded: the parser's output is buffered in this process,
+            # outside every limit the sandbox applies to the parser.
+            proc = run_bounded(
                 argv,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
                 timeout=config.timeout_seconds,
+                limit=self.output_limit_bytes,
                 pass_fds=() if filter_fd is None else (filter_fd,),
             )
         except FileNotFoundError as exc:
             if exc.filename not in (None, argv[0]):
                 raise
             raise SandboxUnavailableError(BWRAP_MISSING) from exc
-        except subprocess.TimeoutExpired as exc:
+        if proc.timed_out:
             return ExecutionOutcome(
                 exit_code=-1,
-                stdout=_decode(exc.stdout),
-                stderr=_decode(exc.stderr),
+                stdout=proc.stdout,
+                stderr=proc.stderr,
                 wall_time_seconds=time.monotonic() - t0,
                 timed_out=True,
                 hardening=hardening,
@@ -291,12 +293,6 @@ def _sandbox_python() -> str | None:
         if candidate.startswith("/usr/") and os.path.isfile(candidate):
             return candidate
     return None
-
-
-def _decode(raw: bytes | str | None) -> str:
-    if raw is None:
-        return ""
-    return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
 
 
 def default_backends() -> list[SandboxBackend]:
