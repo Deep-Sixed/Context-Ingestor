@@ -53,6 +53,7 @@ wasm_module_sha256().
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import struct
 import threading
@@ -211,7 +212,16 @@ class WasmtimeBackend(SandboxBackend):
         module_sha256 = hashlib.sha256(binary).hexdigest()
 
         run = _Run(self, config, binary, preopens)
-        outcome = run.execute()
+        try:
+            outcome = run.execute()
+        finally:
+            # The store owns the WASI context, which holds the preopened
+            # directories open. A trap's traceback forms a reference cycle
+            # back to the store, so without an explicit collection those
+            # handles outlive the run — and Windows then refuses to delete
+            # the staging directory.
+            del run
+            gc.collect()
         return ExecutionOutcome(
             exit_code=outcome.exit_code,
             stdout=outcome.stdout,
@@ -351,6 +361,7 @@ class _Run:
             return self._instantiate_and_run(wt, engine, store)
         finally:
             timer.cancel()
+            self.shim = None  # exports bound to the store
 
     def _instantiate_and_run(self, wt: Any, engine: Any, store: Any) -> ExecutionOutcome:
         try:

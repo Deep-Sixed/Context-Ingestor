@@ -627,3 +627,37 @@ def test_wat_modules_ship_as_text() -> None:
     for module in (PROBE, CHATGPT_EXPORT_SPLIT):
         assert not module.read_bytes().startswith(b"\0asm")
     assert os.path.getsize(CHATGPT_EXPORT_SPLIT) > 0
+
+
+class TestHandlesReleased:
+    """Preopened directories must be closed when a run ends, however it ends.
+
+    Windows cannot delete a directory that is still open, so a leaked WASI
+    handle makes run_in_sandbox fail while removing the staging directory.
+    """
+
+    @staticmethod
+    def _open_under(root: Path) -> int:
+        count = 0
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                if os.readlink(f"/proc/self/fd/{fd}").startswith(str(root)):
+                    count += 1
+            except OSError:
+                pass
+        return count
+
+    @pytest.mark.parametrize("mode,limits,timeout", [
+        ("l", {"fuel": 10**18}, 1),   # wall-clock interrupt trap
+        ("l", {"fuel": 10**6}, 30),   # out-of-fuel trap
+        ("w", {}, 30),                # normal exit
+    ])
+    def test_no_directory_handle_outlives_the_run(
+        self, tmp_path: Path, wasm_backend, mode, limits, timeout
+    ) -> None:
+        # Fails on Windows (via staging cleanup) if a handle leaks; on Linux
+        # the /proc check below catches the same leak directly.
+        result = _probe(tmp_path, mode, backend=_limited(wasm_backend, **limits), timeout=timeout)
+        assert result.exit_code != 0 or mode == "w"
+        if os.path.isdir("/proc/self/fd"):
+            assert self._open_under(tmp_path) == 0
