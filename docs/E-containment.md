@@ -57,6 +57,10 @@ Routing: deterministic Wasm extractors get `wasmtime`; a deterministic
 host-process parser is refused (no backend fixes the clock and entropy for
 native code yet).
 
+Hosted cloud sandboxes (E2B, Daytona, Fly.io and similar) could be added as
+another backend; the requirements they must meet are in
+[cloud-sandboxes.md](cloud-sandboxes.md). Not implemented yet.
+
 ### OCI container backend (roadmap #8)
 
 `stele.containment.oci.OciBackend` drives the Podman or Docker CLI (Podman is
