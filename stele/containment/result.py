@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from ..archive.records import Snapshot
 
 
 @dataclass
@@ -29,6 +33,19 @@ class SandboxResult:
     # SHA-256 of the WebAssembly module binary that ran (Wasm backends only);
     # together with the backend name it identifies the parser.
     module_sha256: str | None = None
+    # Kernel hardening layers the backend applied to this run, e.g.
+    # ("seccomp", "landlock"). Empty when only namespaces were used.
+    hardening: tuple[str, ...] = ()
+    # Why the backend stopped the parser for breaking sandbox policy, e.g. a
+    # blocked system call; None when no violation was detected.
+    violation: str | None = None
+    # Set only when the run was given an evidence store (roadmap #16):
+    # the Snapshot of the staged input (its digest equals input_sha256),
+    # {relative POSIX path: blob digest} for every artifact, and the digest of
+    # the stored tree object over that manifest (the ledger's artifact_hash).
+    input_snapshot: Snapshot | None = None
+    artifact_digests: dict[str, str] = field(default_factory=dict)
+    artifact_bundle_digest: str | None = None
 
     @property
     def succeeded(self) -> bool:

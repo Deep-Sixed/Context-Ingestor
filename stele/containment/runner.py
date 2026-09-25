@@ -23,6 +23,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from .artifacts import collect_artifact_paths
@@ -37,6 +38,10 @@ from .backend import (
 from .result import SandboxResult
 from .sandbox import SandboxConfig
 from .staging import stage_input
+
+if TYPE_CHECKING:
+    from ..archive.records import Snapshot
+    from ..archive.store import BlobStore
 
 __all__ = [
     "ParserRequirements",
@@ -57,6 +62,7 @@ def run_in_sandbox(
     *,
     requirements: ParserRequirements | None = None,
     backend: SandboxBackend | None = None,
+    store: BlobStore | None = None,
 ) -> SandboxResult:
     """Execute config.command in a sandbox and return the result.
 
@@ -74,7 +80,15 @@ def run_in_sandbox(
 
     Raises ValueError if config.artifact_dir already has contents: leftover
     files would otherwise be credited to this run.
+
+    With an evidence store (roadmap #16), the staged input is archived as a
+    Snapshot before the parser runs (the staging copy is deleted afterwards),
+    and every collected artifact is stored by digest, together with a tree
+    object over the artifact manifest. Paths in the result stay locations only.
     """
+    if store is not None:
+        from ..archive.ingest import ingest_artifacts, snapshot_staged_input
+
     if config.artifact_dir.exists() and any(config.artifact_dir.iterdir()):
         raise ValueError(
             f"artifact_dir {config.artifact_dir} is not empty — "
@@ -89,6 +103,7 @@ def run_in_sandbox(
     run_id = uuid4()
     runtime_config = config
     input_sha256: str | None = None
+    input_snapshot: Snapshot | None = None
     staging: TemporaryDirectory[str] | None = None
 
     try:
@@ -100,6 +115,10 @@ def run_in_sandbox(
             staged = stage_input(config.input_path, Path(staging.name) / "input")
             runtime_config = replace(config, input_path=staged.staged_path)
             input_sha256 = staged.sha256
+            if store is not None:
+                # The staged bytes are the Snapshot; archive them before the
+                # staging copy is cleaned up.
+                input_snapshot = snapshot_staged_input(store, staged)
 
         outcome = chosen.execute(runtime_config)
     finally:
@@ -107,6 +126,11 @@ def run_in_sandbox(
             staging.cleanup()
 
     artifact_paths = collect_artifact_paths(config.artifact_dir)
+    artifact_digests: dict[str, str] = {}
+    artifact_bundle_digest: str | None = None
+    if store is not None:
+        artifact_digests = ingest_artifacts(store, config.artifact_dir, artifact_paths)
+        artifact_bundle_digest = store.put_tree(artifact_digests)
 
     return SandboxResult(
         run_id=run_id,
@@ -120,6 +144,11 @@ def run_in_sandbox(
         input_sha256=input_sha256,
         backend=chosen.name,
         module_sha256=outcome.module_sha256,
+        hardening=outcome.hardening,
+        violation=outcome.violation,
+        input_snapshot=input_snapshot,
+        artifact_digests=artifact_digests,
+        artifact_bundle_digest=artifact_bundle_digest,
     )
 
 
@@ -187,6 +216,8 @@ def _main() -> None:
         "timed_out": result.timed_out,
         "wall_time_seconds": round(result.wall_time_seconds, 3),
         "backend": result.backend,
+        "hardening": list(result.hardening),
+        "violation": result.violation,
         "input_sha256": result.input_sha256,
         "module_sha256": result.module_sha256,
         "artifact_paths": [str(p) for p in result.artifact_paths],

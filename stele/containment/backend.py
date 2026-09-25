@@ -21,13 +21,16 @@ separate trusted acquisition step and mounted read-only; parsers run offline.
 from __future__ import annotations
 
 import enum
+import os
 import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-from .sandbox import BubblewrapSandbox, SandboxConfig
+from . import landlock, seccomp
+from .sandbox import BubblewrapSandbox, LandlockLaunch, SandboxConfig
 
 
 class Capability(enum.Enum):
@@ -107,6 +110,15 @@ class ExecutionOutcome:
     # SHA-256 of the executed WebAssembly module binary, part of the parser's
     # identity. None for host-process backends.
     module_sha256: str | None = None
+    # Kernel hardening layers applied to this run, e.g. ("seccomp", "landlock").
+    hardening: tuple[str, ...] = ()
+    # Set when the parser was stopped for breaking sandbox policy.
+    violation: str | None = None
+
+
+SECCOMP_VIOLATION = (
+    "seccomp: the parser made a blocked system call and was killed (SIGSYS)"
+)
 
 
 class SandboxBackend(ABC):
@@ -145,15 +157,37 @@ class BubblewrapBackend(SandboxBackend):
         self._sandbox = BubblewrapSandbox()
 
     def capabilities(self) -> frozenset[Capability]:
-        # No SYSCALL_FILTER until #6 (seccomp), no RESOURCE_LIMITS beyond the
-        # wall-clock timeout, no GPU (devices are not passed into /dev), and
-        # not DETERMINISTIC (real clock and entropy are visible).
-        return frozenset({
+        # SYSCALL_FILTER only where execute() will really install the seccomp
+        # filter. No RESOURCE_LIMITS beyond the wall-clock timeout, no GPU
+        # (devices are not passed into /dev), and not DETERMINISTIC (real
+        # clock and entropy are visible).
+        caps = {
             Capability.FILESYSTEM_ISOLATION,
             Capability.NETWORK_ISOLATION,
             Capability.HOST_PROCESS,
             Capability.NATIVE_LIBS,
-        })
+        }
+        if self.seccomp_program() is not None:
+            caps.add(Capability.SYSCALL_FILTER)
+        return frozenset(caps)
+
+    def seccomp_program(self) -> bytes | None:
+        """The BPF filter execute() installs, or None on unsupported hosts."""
+        return seccomp.filter_for_host()
+
+    def landlock_launch(self) -> LandlockLaunch | None:
+        """How execute() applies Landlock, or None when it cannot.
+
+        Landlock is defense in depth under the mount namespace, so a kernel
+        without it still runs parsers; the run result's ``hardening`` says
+        whether it was applied.
+        """
+        if landlock.abi_version() < 1:
+            return None
+        python = _sandbox_python()
+        if python is None:
+            return None
+        return LandlockLaunch(python=python, script=landlock.__file__)
 
     def available(self) -> bool:
         # Late import keeps runner.bwrap_available the single patchable probe.
@@ -165,7 +199,26 @@ class BubblewrapBackend(SandboxBackend):
         return BWRAP_MISSING
 
     def execute(self, config: SandboxConfig) -> ExecutionOutcome:
-        argv = self._sandbox.build_argv(config)
+        program = self.seccomp_program()
+        launch = self.landlock_launch()
+        hardening = tuple(
+            name for name, on in (("seccomp", program), ("landlock", launch)) if on
+        )
+        filter_fd = seccomp.filter_fd(program) if program is not None else None
+        try:
+            return self._run(config, filter_fd, launch, hardening)
+        finally:
+            if filter_fd is not None:
+                os.close(filter_fd)
+
+    def _run(
+        self,
+        config: SandboxConfig,
+        filter_fd: int | None,
+        launch: LandlockLaunch | None,
+        hardening: tuple[str, ...],
+    ) -> ExecutionOutcome:
+        argv = self._sandbox.build_argv(config, seccomp_fd=filter_fd, landlock=launch)
         t0 = time.monotonic()
         try:
             proc = subprocess.run(
@@ -174,6 +227,7 @@ class BubblewrapBackend(SandboxBackend):
                 capture_output=True,
                 text=True,
                 timeout=config.timeout_seconds,
+                pass_fds=() if filter_fd is None else (filter_fd,),
             )
         except FileNotFoundError as exc:
             if exc.filename not in (None, argv[0]):
@@ -186,13 +240,34 @@ class BubblewrapBackend(SandboxBackend):
                 stderr=_decode(exc.stderr),
                 wall_time_seconds=time.monotonic() - t0,
                 timed_out=True,
+                hardening=hardening,
             )
+        # bwrap's init reports a signal death as 128 + signo. A parser could
+        # exit with that status on purpose, but that only marks its own run
+        # as failed.
+        violation = None
+        if filter_fd is not None and proc.returncode == 128 + seccomp.SIGSYS:
+            violation = SECCOMP_VIOLATION
         return ExecutionOutcome(
             exit_code=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
             wall_time_seconds=time.monotonic() - t0,
+            hardening=hardening,
+            violation=violation,
         )
+
+
+def _sandbox_python() -> str | None:
+    """An interpreter that exists inside the sandbox, for the launcher.
+
+    Only /usr is bound from the host, so prefer the running interpreter when
+    it lives there (a known-good version), else the system python3.
+    """
+    for candidate in (os.path.realpath(sys.executable), "/usr/bin/python3"):
+        if candidate.startswith("/usr/") and os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def _decode(raw: bytes | str | None) -> str:
