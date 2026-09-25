@@ -156,7 +156,9 @@ class TestProcessBackendFaults:
     def test_crash_is_reported_with_its_signal(
         self, tmp_path, containment_backend, sandbox_python
     ) -> None:
-        code = PARTIAL + "import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n"
+        # A real memory fault: a container runs the parser as PID 1, which
+        # ignores signals sent with kill() but not faults the kernel raises.
+        code = PARTIAL + "import ctypes\nctypes.string_at(0)\n"
         result = _run(tmp_path, sandbox_python, code)
         assert result.failure.reason is FailureReason.CRASHED
         assert result.failure.signal_name == "SIGSEGV"
@@ -179,6 +181,12 @@ class TestProcessBackendFaults:
         )
         code = PARTIAL + "out = os.environ['STELE_OUTPUT_DIR']\n" + make
         result = _run(tmp_path, sandbox_python, code)
+        if kind == "fifo" and getattr(containment_backend, "runtime", None) == "runsc":
+            # gVisor keeps the FIFO inside the sandbox: it never exists on the
+            # host, so there is nothing unsafe to refuse.
+            assert result.succeeded
+            assert [p.name for p in result.artifact_paths] == ["partial.txt"]
+            return
         assert result.exit_code == 0 and not result.succeeded
         assert result.failure.reason is FailureReason.UNSAFE_ARTIFACT
         assert "symlink" in result.failure.detail or "non-regular" in result.failure.detail

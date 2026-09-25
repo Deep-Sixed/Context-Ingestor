@@ -363,7 +363,7 @@ class TestLive:
         run = run_parser(_probe(code), doc, tmp_path / "out", store=store, backend=backend)
         assert not run.succeeded
         assert "memory limit" in run.failure, (run.failure, run.result.stderr)
-        assert list((tmp_path / "out").iterdir()) == []
+        assert not (tmp_path / "out").exists()  # a failed run removes the output it created (#11)
         assert run.result.artifact_bundle_digest is None
         # Nothing lands in the caller's working directory (Podman's conmon
         # writes an "oom" file into its own working directory on OOM kills).
@@ -378,7 +378,7 @@ class TestLive:
         )
         run = run_parser(_probe(code), doc, tmp_path / "out", backend=backend, timeout_seconds=5)
         assert run.result.timed_out and "timed out" in run.failure
-        assert list((tmp_path / "out").iterdir()) == []
+        assert not (tmp_path / "out").exists()  # a failed run removes the output it created (#11)
 
 
 # ---------------------------------------------------------------------------
