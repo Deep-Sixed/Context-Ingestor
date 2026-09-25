@@ -125,6 +125,17 @@ as the entrypoint of the image, so it must resolve inside the image (e.g.
   If the Stele process is killed, a running Docker container is not stopped
   (Podman gets `--timeout` as a backstop).
 
+**Parser output is captured within a fixed size.** Whatever a parser prints
+is buffered in the Stele process, outside every limit the sandbox puts on the
+parser (a container's memory limit does not cover the engine CLI relaying its
+output). Every backend therefore keeps at most `output_limit_bytes` (default
+8 MiB) of each of stdout and stderr, reads and discards the rest so the
+parser never blocks on a full pipe, and ends a truncated stream with
+`[stele: stdout truncated at N bytes]`. Process backends do this in
+`stele.containment.capture.run_bounded`; the Wasm backend captures guest
+output in-process with the same bound. Parsers write results to
+`/stele/output`, not to stdout.
+
 Every run result records the backend that executed it (`SandboxResult.backend`)
 and the SHA-256 of the exact staged input bytes (`SandboxResult.input_sha256`;
 a manifest digest for directory inputs). Inputs may be a single regular file or

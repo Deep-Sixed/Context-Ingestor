@@ -195,7 +195,7 @@ class Dispatcher:
         try:
             # Binds the delivery to this payload, or refuses it if an earlier
             # or concurrent attempt already bound a different one.
-            self._log.append_intent(dispatch_id, chunks)
+            attempt_id = self._log.append_intent(dispatch_id, chunks)
         except PayloadConflictError as exc:
             # Nothing was written and the delivery's log is left as it is: it
             # describes the bound payload's attempts, which this one is not.
@@ -205,9 +205,11 @@ class Dispatcher:
             writer.write_chunks(chunks, target, dispatch_id=dispatch_id)
         except Exception as exc:
             done = exc.chunks_written if isinstance(exc, PartialWriteError) else None
-            self._log.append(dispatch_id, "failure", done=done, error=repr(exc))
+            self._log.append(
+                dispatch_id, "failure", done=done, error=repr(exc), attempt_id=attempt_id
+            )
         else:
-            self._log.append(dispatch_id, "receipt", done=len(chunks))
+            self._log.append(dispatch_id, "receipt", done=len(chunks), attempt_id=attempt_id)
 
         # An invalidation that raced this write may have run its removals
         # before the data landed; remove it now rather than leave it live.

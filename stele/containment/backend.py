@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import landlock, seccomp
+from .capture import DEFAULT_OUTPUT_LIMIT_BYTES, BoundedCapture, run_bounded
 from .sandbox import BubblewrapSandbox, LandlockLaunch, SandboxConfig
 from .telemetry import (
     FailureReason,
@@ -194,8 +195,10 @@ class BubblewrapBackend(SandboxBackend):
 
     name = "bubblewrap"
 
-    def __init__(self) -> None:
+    def __init__(self, *, output_limit_bytes: int = DEFAULT_OUTPUT_LIMIT_BYTES) -> None:
         self._sandbox = BubblewrapSandbox()
+        # Kept of each of the parser's stdout and stderr; the rest is discarded.
+        self.output_limit_bytes = output_limit_bytes
 
     def capabilities(self) -> frozenset[Capability]:
         # SYSCALL_FILTER only where execute() will really install the seccomp
@@ -266,6 +269,7 @@ class BubblewrapBackend(SandboxBackend):
                 argv,
                 timeout=config.timeout_seconds,
                 pass_fds=() if filter_fd is None else (filter_fd,),
+                output_limit_bytes=self.output_limit_bytes,
             )
         except FileNotFoundError as exc:
             if exc.filename not in (None, argv[0]):
@@ -308,7 +312,10 @@ class BubblewrapBackend(SandboxBackend):
             cpu_time_seconds=proc.cpu_time_seconds,
             peak_memory_bytes=proc.peak_memory_bytes,
             runtime="bwrap",
-            limits={"timeout_seconds": config.timeout_seconds},
+            limits={
+                "timeout_seconds": config.timeout_seconds,
+                "output_bytes": self.output_limit_bytes,
+            },
             failure=failure,
         )
 
@@ -324,9 +331,17 @@ class ProcessResult:
 
 
 def run_process(
-    argv: list[str], *, timeout: float, pass_fds: Sequence[int] = ()
+    argv: list[str],
+    *,
+    timeout: float,
+    pass_fds: Sequence[int] = (),
+    output_limit_bytes: int = DEFAULT_OUTPUT_LIMIT_BYTES,
 ) -> ProcessResult:
     """Run argv with no stdin, capture its output, and enforce the timeout.
+
+    At most output_limit_bytes of each of stdout and stderr is kept; the rest
+    is read and discarded (stele.containment.capture), since the captured
+    output lives in this process, outside every limit on the parser.
 
     The process gets its own process group, and the whole group is killed
     with SIGKILL at the timeout. It is reaped with wait4, whose resource
@@ -335,20 +350,20 @@ def run_process(
     Hosts without wait4 (Windows) fall back to subprocess.run with no usage.
     """
     if not hasattr(os, "wait4"):
-        try:
-            done = subprocess.run(
-                argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                timeout=timeout, pass_fds=tuple(pass_fds),
-            )
-        except subprocess.TimeoutExpired as exc:
-            return ProcessResult(-1, _decode(exc.stdout), _decode(exc.stderr), True, None, None)
-        return ProcessResult(done.returncode, done.stdout, done.stderr, False, None, None)
+        done = run_bounded(argv, timeout=timeout, limit=output_limit_bytes, pass_fds=pass_fds)
+        return ProcessResult(
+            -1 if done.timed_out else done.returncode,
+            done.stdout, done.stderr, done.timed_out, None, None,
+        )
 
     proc = subprocess.Popen(
         argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         pass_fds=tuple(pass_fds), start_new_session=True,
     )
-    streams: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    streams = {
+        "stdout": BoundedCapture(output_limit_bytes),
+        "stderr": BoundedCapture(output_limit_bytes),
+    }
     readers = [
         threading.Thread(target=_drain, args=(pipe, streams[name]), daemon=True)
         for name, pipe in (("stdout", proc.stdout), ("stderr", proc.stderr))
@@ -389,17 +404,18 @@ def run_process(
     scale = 1 if sys.platform == "darwin" else 1024
     return ProcessResult(
         returncode=proc.returncode,
-        stdout=b"".join(streams["stdout"]).decode("utf-8", errors="replace"),
-        stderr=b"".join(streams["stderr"]).decode("utf-8", errors="replace"),
+        stdout=streams["stdout"].text("stdout"),
+        stderr=streams["stderr"].text("stderr"),
         timed_out=state["killed"],
         cpu_time_seconds=usage.ru_utime + usage.ru_stime,
         peak_memory_bytes=usage.ru_maxrss * scale,
     )
 
 
-def _drain(pipe: Any, chunks: list[bytes]) -> None:
+def _drain(pipe: Any, capture: BoundedCapture) -> None:
+    # Keeps reading past the limit so the parser never blocks on a full pipe.
     while chunk := pipe.read(65536):
-        chunks.append(chunk)
+        capture(chunk)
 
 
 def _sandbox_python() -> str | None:
@@ -412,12 +428,6 @@ def _sandbox_python() -> str | None:
         if candidate.startswith("/usr/") and os.path.isfile(candidate):
             return candidate
     return None
-
-
-def _decode(raw: bytes | str | None) -> str:
-    if raw is None:
-        return ""
-    return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
 
 
 def default_backends() -> list[SandboxBackend]:

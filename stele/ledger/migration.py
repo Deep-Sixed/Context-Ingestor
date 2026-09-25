@@ -5,9 +5,11 @@ Version 2 (#12) → 3 (#13) adds the delivery log tables, 3 → 4 (#14) the
 replay log, 4 → 5 (#30) the run_conditions column, NULL for existing
 records (their device and limits were never recorded), 5 → 6 binds each
 delivery to the payload of its first intent and admits the FAILED replay
-outcome, and 6 → 7 adds the hash-chained event log. None of these changes
-existing rows; reaching 7 logs every existing record, delivery and replay as
-an *.imported event, so the chain covers the ledger from the migration on.
+outcome, 6 → 7 adds the hash-chained event log, and 7 → 8 gives delivery
+events the attempt_id of their write attempt (NULL for existing events).
+None of these changes existing rows; reaching 7 logs every existing record,
+delivery and replay as an *.imported event, so the chain covers the ledger
+from the migration on.
 
 Version 0 is a pre-#12 ledger.
 
@@ -45,6 +47,7 @@ from .store import (
     REPLAY_DDL,
     RUN_CONDITIONS_DDL,
     V6_DDL,
+    V8_DDL,
     ArtifactDriftError,
     MissingArtifactError,
     archive_bundle,
@@ -66,13 +69,19 @@ def migrate_to_current(conn: sqlite3.Connection, version: int, archive: BlobStor
     """Migrate in place. The caller holds a BEGIN IMMEDIATE transaction."""
     # version → DDL that reaches version + 1. Reaching 7 creates the event
     # log, which then records the state found as *.imported events.
-    additive = {2: DELIVERY_DDL, 3: REPLAY_DDL, 4: RUN_CONDITIONS_DDL, 5: V6_DDL, 6: EVENTS_DDL}
+    additive = {
+        2: DELIVERY_DDL, 3: REPLAY_DDL, 4: RUN_CONDITIONS_DDL, 5: V6_DDL, 6: EVENTS_DDL,
+        7: V8_DDL,
+    }
     if version in additive:
+        creates_event_log = version < 7
         while version in additive:
             for statement in additive[version]:
                 conn.execute(statement)
             version += 1
-        backfill(conn)
+        if creates_event_log:
+            # Only once: a ledger that already has the event log is covered.
+            backfill(conn)
         conn.execute(f"PRAGMA user_version = {version}")
         return
     if version != 0:

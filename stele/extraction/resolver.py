@@ -69,7 +69,8 @@ def resolve_pointer(doc: Any, pointer: str) -> Any:
                 raise ResolutionError(f"pointer {pointer!r}: no member {token!r}")
             value = value[token]
         elif isinstance(value, list):
-            if not token.isdigit() or (token != "0" and token.startswith("0")):
+            # ASCII only: str.isdigit() also accepts "²" or "١", which int() rejects.
+            if not (token.isascii() and token.isdigit()) or (token != "0" and token.startswith("0")):
                 raise ResolutionError(f"pointer {pointer!r}: {token!r} is not an array index")
             index = int(token)
             if index >= len(value):

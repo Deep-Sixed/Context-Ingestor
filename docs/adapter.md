@@ -112,6 +112,14 @@ bounds what the target holds:
 | mid-write | `in_flight` | some of the planned chunks |
 | after writing, before the receipt | `in_flight` | all of them |
 
+Each write attempt gets its own `attempt_id` (ledger schema 8), carried by
+its intent and by its receipt or failure. Two dispatchers can deliver the
+same record to the same target at once, and the log keeps their attempts
+apart: one attempt's receipt never closes another's intent, so an attempt
+that never reported still counts as possibly written after the other one
+finishes. Events from before schema 8 have no `attempt_id` and are read one
+attempt at a time, as they were written.
+
 `Delivery.explain()` states that bound ("between 0 and N chunks … under
 dispatch_id …"). Dispatching the same record to the same target again reuses
 the delivery's `dispatch_id`, so the retry completes it without duplicates;
@@ -125,7 +133,8 @@ first checks any earlier intent, and a database trigger refuses an intent
 with a different digest. So a retry, or a concurrent dispatch of the same
 record to the same target, that presents a different payload (even one that
 differs only in metadata) is refused: `dispatch()` returns `status="failed"`,
-its writer is never called, and the delivery's log is left unchanged. Deliveries bound before ledger schema 6 recorded a digest of ids and
+its writer is never called, and the delivery's log is left unchanged.
+Deliveries bound before ledger schema 6 recorded a digest of ids and
 content hashes only, and are checked that far.
 
 A failed dispatch never changes the record's ledger state; invalidating
@@ -143,7 +152,8 @@ Dispatcher.invalidate(record_id, reason)
 
 - Deliveries the log proves hold nothing at the target are skipped: those
   that wrote nothing, and those removed after their last write concluded. A
-  delivery whose write was still in flight (intent without an outcome) when
+  delivery with a write still in flight (an attempt's intent without that
+  attempt's outcome) when
   it was removed may have landed since, e.g. if the dispatching process
   crashed after writing, so every `retract()` removes it again (removal is
   idempotent). A failed removal is retried by calling `invalidate()` or
