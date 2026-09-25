@@ -11,25 +11,31 @@ codebases that handle hostile input. Stele treats every parser as untrusted:
   no network, and exactly one writable directory. It runs in bubblewrap, an
   OCI container (Podman/Docker, optionally gVisor or GPU), or a
   WebAssembly/WASI runtime.
-- **Record what it produced.** Output is collected without following
-  symlinks, hashed, and recorded in a ledger as `pending`. A record becomes
-  `committed` only after the downstream write succeeds and the bundle is
-  re-verified.
-- **Keep evidence.** A content-addressed store can archive the exact input
-  bytes the parser saw and every artifact it produced.
-- **Replay and invalidate.** Committed runs can be re-checked for drift or
-  missing files, and invalidated by run or by source, without rewriting
-  history.
-- **Write through one door.** Adapters turn a ledger record into typed,
-  hash-checked chunks. Only a Dispatcher, using writers you register, sends
-  them to target stores.
+- **Record what it produced.** Every run gets its own ledger record: the
+  digest of the exact input the parser read, the parser's identity (name,
+  version, image or module digest) and config, and a manifest of its output.
+  A record is `sealed` once its whole bundle is stored in the evidence archive
+  and verified.
+- **Keep evidence.** A content-addressed archive holds the input bytes the
+  parser saw and every artifact it produced. Nothing in it is overwritten, and
+  every read re-hashes the bytes.
+- **Replay and invalidate.** A sealed run can be re-checked against the
+  archive, or replayed by running the recorded parser on the recorded input
+  again. Each replay is reported as `REPRODUCED`, `EQUIVALENT`, `DIVERGED` or
+  `UNREPLAYABLE`. Invalidating a run withdraws it and removes what it
+  delivered, without rewriting history.
+- **Write through one door.** Adapters turn a sealed bundle into typed,
+  hash-checked chunks. Only the Dispatcher, using writers you register, sends
+  them to target stores. It logs an intent before each write and a receipt or
+  failure after it, so a crash never leaves you guessing what a target holds.
 
 ```
 source ─▶ staging ─▶ sandboxed parser ─▶ /stele/output ─▶ ledger (pending)
-                                                              │
-                        target store ◀─ TargetWriter ◀─ Dispatcher ◀─ Adapter
-                                                              │
-                                                     ledger (committed)
+                                                              │ archive + verify
+                                                              ▼
+ target store ◀─ TargetWriter ◀─ Dispatcher ◀─ Adapter ◀─ ledger (sealed)
+                                     │
+                                     └─▶ delivery log (intent → receipt)
 ```
 
 ## Quick start
@@ -54,33 +60,43 @@ python -m stele.containment.runner \
 Inside the sandbox the parser reads `$STELE_INPUT_PATH` and writes only to
 `$STELE_OUTPUT_DIR` (`/stele/output`).
 
-Or from Python, from sandbox run to ledger to target:
+Or from Python, from sandbox run to sealed record to target:
 
 ```python
 from pathlib import Path
 
+from stele.archive.records import Source
+from stele.archive.store import BlobStore
 from stele.containment.runner import run_in_sandbox
 from stele.containment.sandbox import SandboxConfig
 from stele.contracts.dispatcher import Dispatcher
+from stele.ledger.models import ParserIdentity
 from stele.ledger.store import LedgerStore
-from stele.ledger.transaction import ledger_transaction
+from stele.ledger.transaction import record_run
+
+archive = BlobStore(Path("archive"))
+ledger = LedgerStore(Path("ledger.db"), archive)
 
 result = run_in_sandbox(SandboxConfig(
     command=["/usr/bin/python3", "/stele/parser"],
     script_path=Path("my_parser.py"),
     input_path=Path("paper.pdf"),
     artifact_dir=Path("out"),
-))
+), store=archive)                      # archives the input Snapshot and artifacts
 
-store = LedgerStore(Path("ledger.db"))
-dispatcher = Dispatcher()
-dispatcher.register_target(MyTarget, my_writer)    # your TargetWriter
+record = record_run(                   # PENDING -> SEALED, or FAILED
+    ledger, result,
+    parser=ParserIdentity("my_parser", "1.0"),
+    parser_config={},
+    source=Source.from_path("paper.pdf"),
+)
 
-with ledger_transaction(store, result) as record:  # PENDING
-    outcome = dispatcher.dispatch(my_adapter, record, MyTarget("docs"))
-    if outcome.status != "success":
-        raise RuntimeError(outcome.error)          # record becomes FAILED
-# clean exit: record is COMMITTED
+dispatcher = Dispatcher(ledger)
+dispatcher.register_target(MyTarget, my_writer)          # your TargetWriter
+dispatcher.dispatch(my_adapter, record.record_id, MyTarget("docs"))
+
+# Later, if the run should no longer count:
+dispatcher.invalidate(record.record_id, "source_changed")  # removes delivered data
 ```
 
 ### Packaged parsers
@@ -103,7 +119,8 @@ See [parsers/README.md](parsers/README.md).
 | No writes outside `/stele/output` | Enforced by mount layout; also by Landlock where the kernel has it |
 | Syscall denylist (seccomp) | bubblewrap on x86_64/aarch64; OCI when the engine's profile is active; gVisor |
 | No unsandboxed fallback | A run with no capable backend is refused before anything executes |
-| Tamper-evident artifacts | Hashes are computed on the host from no-follow opens and re-verified at commit and replay |
+| Tamper-evident artifacts | Hashes are computed on the host from no-follow opens, and archived bytes are re-verified on every read, seal, dispatch and replay |
+| Only sealed records are delivered | The Dispatcher checks the live ledger before every write |
 | Adapter isolation | **Contract only.** Adapters run in-process as trusted code. Only parsers are sandboxed. |
 
 Details and known limits: [docs/containment.md](docs/containment.md).
@@ -113,9 +130,9 @@ Details and known limits: [docs/containment.md](docs/containment.md).
 | Doc | Covers |
 |-----|--------|
 | [Containment](docs/containment.md) | Sandbox backends, seccomp, Landlock, OCI and Wasm details |
-| [Ledger](docs/ledger.md) | Record fields, pending → committed protocol |
-| [Replay](docs/replay.md) | Drift detection, invalidation, ledger views |
-| [Adapter contract](docs/adapter.md) | `SteleAdapter`, `Dispatcher`, `TargetWriter` |
+| [Ledger](docs/ledger.md) | State machine, record fields, parser identity, migration |
+| [Replay](docs/replay.md) | Validation, replay outcomes, invalidation, ledger views |
+| [Adapter contract](docs/adapter.md) | `SteleAdapter`, `TargetWriter`, the Dispatcher and delivery log |
 | [Evidence store](docs/archive.md) | Content-addressed Snapshot and artifact archive |
 | [Cloud sandboxes](docs/cloud-sandboxes.md) | Design note for hosted sandbox backends (not implemented) |
 | [Parser images](parsers/README.md) | Building and running MinerU, Marker, Docling |
@@ -126,8 +143,8 @@ Details and known limits: [docs/containment.md](docs/containment.md).
 stele/
 ├── containment/   sandbox backends (bubblewrap, OCI, Wasmtime), staging, seccomp, Landlock
 ├── archive/       content-addressed evidence store
-├── ledger/        artifact ledger (SQLite, WAL)
-├── replay/        drift detection, invalidation, views
+├── ledger/        artifact ledger and delivery log (SQLite, WAL)
+├── replay/        validation, replay engine, invalidation, views
 ├── contracts/     adapter, dispatcher and target-writer protocols
 ├── extractors/    deterministic Wasm extractors
 └── parsers/       packaged ML parsers in pinned images

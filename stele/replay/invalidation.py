@@ -1,9 +1,10 @@
 """
 Stele replay — invalidation operations.
 
-Invalidation marks committed (or pending) records as INVALIDATED so that
-adapters know to remove or tombstone the corresponding data from
-their target stores.
+Invalidation marks sealed (or pending) records as INVALIDATED. These
+functions touch the ledger only: the data a record delivered is removed by
+Dispatcher.invalidate(), or, after invalidating here, by
+Dispatcher.retract_invalidated().
 
 Invalidation is non-destructive: the ledger record and its metadata are
 preserved. Only the state transitions and the reason_note are written.
@@ -24,7 +25,7 @@ def invalidate_record(
 ) -> ArtifactRecord:
     """Invalidate a single record by ID.
 
-    Transitions PENDING or COMMITTED → INVALIDATED.
+    Transitions PENDING or SEALED → INVALIDATED.
     The reason and optional note are stored in the record's error field as:
       "INVALIDATED: <reason.value> — <note>"
     """
@@ -41,17 +42,15 @@ def invalidate_by_source_hash(
     *,
     note: str = "",
 ) -> list[ArtifactRecord]:
-    """Invalidate every COMMITTED or PENDING record derived from source_hash.
+    """Invalidate every SEALED or PENDING record over the input Snapshot source_hash.
 
     Useful when the upstream source file is updated — all previously
-    committed artifacts derived from the old version become invalid.
+    sealed artifacts derived from the old version become invalid.
     Returns the list of newly invalidated records.
     """
-    from ..ledger.models import ArtifactState
-
     candidates = [
-        r for r in store.list_by_states([ArtifactState.COMMITTED, ArtifactState.PENDING])
-        if r.source_hash == source_hash
+        r for r in store.find_by_source_hash(source_hash)
+        if r.state in (ArtifactState.SEALED, ArtifactState.PENDING)
     ]
 
     invalidated: list[ArtifactRecord] = []
@@ -63,21 +62,21 @@ def invalidate_by_source_hash(
 
 def auto_invalidate_drifted(
     store: LedgerStore,
-    plan_candidates: list,  # list[ReplayCandidate]
+    plan_candidates: list,  # list[ValidationCandidate]
     *,
     note: str = "detected by validator",
 ) -> list[ArtifactRecord]:
-    """Invalidate all drifted or missing candidates from a ReplayPlan pass.
+    """Invalidate all drifted or missing candidates from a ValidationPlan pass.
 
-    Convenience wrapper: after plan_replay() detects drift or missing files,
+    Convenience wrapper: after plan_validation() detects drift or missing files,
     call this to bulk-invalidate those records so they are excluded from
-    subsequent replay passes.  Candidates that are already INVALIDATED (from
-    plan_replay(include_invalidated=True)) are skipped rather than aborting
+    subsequent validation passes.  Candidates that are already INVALIDATED (from
+    plan_validation(include_invalidated=True)) are skipped rather than aborting
     the batch partway through.
     """
     invalidated: list[ArtifactRecord] = []
     for candidate in plan_candidates:
-        if candidate.is_replayable or candidate.record.state is ArtifactState.INVALIDATED:
+        if candidate.is_intact or candidate.record.state is ArtifactState.INVALIDATED:
             continue
         reason = (
             InvalidationReason.DRIFT_DETECTED

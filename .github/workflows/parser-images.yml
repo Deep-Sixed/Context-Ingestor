@@ -11,6 +11,7 @@ on:
       - "parsers/**"
       - "stele/parsers/**"
       - "stele/containment/**"
+      - "stele/replay/**"
       - "tests/conftest.py"
       - "tests/test_parser_images.py"
       - "tests/test_containment.py"

@@ -11,13 +11,18 @@ chatgpt_export_split
     conversation objects) into conversation-NNNNNN.json files holding each
     element's exact bytes, plus index.jsonl with each element's byte offset and
     length in the input. See chatgpt_export_split.wat for the format.
+
+Each extractor also has a ParserSpec (roadmap #14), so its records can be
+replayed; EXTRACTOR_SPECS lists them for a ParserCatalog.
 """
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Mapping
 
 from ..containment.backend import ParserRequirements
 from ..containment.sandbox import SandboxConfig
+from ..replay.parsers import ParserSpec
 
 CHATGPT_EXPORT_SPLIT = Path(__file__).with_name("chatgpt_export_split.wat")
 
@@ -39,3 +44,27 @@ def chatgpt_export_split_config(
         input_path=input_path,
         timeout_seconds=timeout_seconds,
     )
+
+
+def _chatgpt_export_split(
+    input_path: Path | None, artifact_dir: Path, parser_config: Mapping[str, Any]
+) -> SandboxConfig:
+    unknown = set(parser_config) - {"timeout_seconds"}
+    if unknown:
+        raise ValueError(f"chatgpt-export-split takes no config {sorted(unknown)}")
+    if input_path is None:
+        raise ValueError("chatgpt-export-split needs an input")
+    return chatgpt_export_split_config(
+        input_path, artifact_dir, timeout_seconds=parser_config.get("timeout_seconds", 300)
+    )
+
+
+CHATGPT_EXPORT_SPLIT_SPEC = ParserSpec(
+    name="chatgpt-export-split",
+    version="1",
+    requirements=WASM_EXTRACTOR_REQUIREMENTS,
+    build_config=_chatgpt_export_split,
+    module_path=CHATGPT_EXPORT_SPLIT,
+)
+
+EXTRACTOR_SPECS = [CHATGPT_EXPORT_SPLIT_SPEC]

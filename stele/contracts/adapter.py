@@ -5,21 +5,29 @@ The SteleAdapter protocol is the only authorized write boundary between
 parser output and downstream storage targets.
 
 Rules:
-  - Adapters receive a committed ArtifactRecord and return list[SteleChunk].
-  - Adapters do NOT receive DB connections, file handles, or target objects.
+  - Adapters receive a SealedBundle and return list[SteleChunk].
+  - A SealedBundle serves the sealed record's artifact bytes from the
+    evidence archive, re-verified against their digest on every read.
+    Adapters never receive file paths, DB connections, file handles, or
+    target objects.
   - Adapters do NOT call target-store APIs (e.g. LightRAG, Hindsight) directly.
-  - All target writes are routed through the Dispatcher (contracts/dispatcher.py).
+  - All target writes, and their removal on invalidation, are routed
+    through the Dispatcher (contracts/dispatcher.py).
   - Invalid adapter output (wrong hashes, empty chunks) is rejected by the
     Dispatcher before any write reaches a target.
+  - Adapters are trusted code running in the host process: the rules above
+    are a contract, not a capability boundary (see docs/adapter.md).
 """
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Protocol
-from uuid import UUID
+from types import MappingProxyType
+from typing import Any, Mapping, Protocol
 
-from ..ledger.models import ArtifactRecord
+from ..archive.records import SnapshotKind
+from ..archive.store import BlobStore
+from ..ledger.models import ArtifactRecord, ParserIdentity
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +57,64 @@ def make_chunk(chunk_id: str, content: str, **metadata: Any) -> SteleChunk:
         token_count=len(content.split()),
         metadata=metadata,
     )
+
+
+# ---------------------------------------------------------------------------
+# What an adapter reads
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SealedBundle:
+    """A sealed record's artifacts, served by digest from the evidence archive.
+
+    read() returns bytes the archive has just re-hashed against the digest the
+    ledger recorded, so an adapter can only ever see the bytes that were
+    sealed. The bundle carries the record's provenance but no host paths.
+    """
+
+    record_id: str
+    run_id: str
+    artifact_hash: str
+    manifest: Mapping[str, str]  # {relative POSIX path: sha256}
+    parser: ParserIdentity | None
+    parser_config: Mapping[str, Any] | None
+    source_hash: str | None
+    source_kind: SnapshotKind | None
+    source_path: str | None      # descriptive locator of the input, not a readable path
+    _archive: BlobStore = field(repr=False, compare=False)
+
+    @classmethod
+    def from_record(cls, record: ArtifactRecord, archive: BlobStore) -> "SealedBundle":
+        return cls(
+            record_id=record.record_id,
+            run_id=record.run_id,
+            artifact_hash=record.artifact_hash,
+            manifest=MappingProxyType(dict(record.artifact_manifest)),
+            parser=record.parser,
+            parser_config=(
+                MappingProxyType(dict(record.parser_config))
+                if record.parser_config is not None else None
+            ),
+            source_hash=record.source_hash,
+            source_kind=record.source_kind,
+            source_path=record.source_path,
+            _archive=archive,
+        )
+
+    def paths(self) -> list[str]:
+        """Relative POSIX paths of every artifact, sorted."""
+        return sorted(self.manifest)
+
+    def read(self, path: str) -> bytes:
+        """Verified bytes of one artifact (IntegrityError if they changed)."""
+        try:
+            digest = self.manifest[path]
+        except KeyError:
+            raise KeyError(f"no artifact {path!r} in record {self.record_id}") from None
+        return self._archive.read(digest)
+
+    def read_text(self, path: str, encoding: str = "utf-8") -> str:
+        return self.read(path).decode(encoding)
 
 
 # ---------------------------------------------------------------------------
@@ -119,24 +185,20 @@ class SteleAdapter(Protocol):
     """
     Implement this protocol to route parser artifacts through Stele.
 
-    transform() is the ONLY method called by the Dispatcher.  It receives a
-    committed ArtifactRecord (no DB handles, no target connections) and returns
-    the chunks to be written.
+    transform() is the only method the Dispatcher calls. It receives a
+    SealedBundle (verified bytes, no paths, no DB handles, no target
+    connections) and returns the chunks to be written.
 
-    on_invalidation() is intended to be called when a previously dispatched
-    run_id is invalidated (see replay/).  Implementations must tombstone or remove
-    the data they previously wrote to their target store.  NOTE: the
-    Dispatcher does not call it yet — callers must invoke it themselves.
+    Adapters have no invalidation hook: removing a delivery's data is a
+    target write, so the Dispatcher asks the TargetWriter that wrote it
+    (TargetWriter.remove_delivery) and records the removal.
     """
 
-    def transform(self, record: ArtifactRecord) -> list[SteleChunk]:
-        """Read the committed artifact and return normalized chunks.
+    def transform(self, bundle: SealedBundle) -> list[SteleChunk]:
+        """Read the sealed artifacts and return normalized chunks.
 
+        Must be deterministic: a retried delivery must produce the same chunks.
         Must not write to any external store.
         Must not hold references to DB connections or target objects.
         """
-        ...
-
-    def on_invalidation(self, run_id: UUID, reason: str) -> None:
-        """Remove or tombstone all chunks associated with run_id."""
         ...

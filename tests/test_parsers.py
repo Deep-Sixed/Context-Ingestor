@@ -21,10 +21,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from stele.archive import Source
 from stele.archive.store import BlobStore
 from stele.containment.backend import (
     Capability,
@@ -34,6 +36,8 @@ from stele.containment.backend import (
     UnsupportedBackendError,
 )
 from stele.containment.oci import DEFAULT_OCI_IMAGE, OciBackend
+from stele.ledger.models import ParserIdentity as ParserIdentityRecord
+from stele.ledger.transaction import record_run
 from stele.parsers import (
     CONFIG_ENV,
     ParserImage,
@@ -45,7 +49,11 @@ from stele.parsers import (
     thread_env,
 )
 from stele.parsers.__main__ import _main as cli_main
-from stele.parsers.catalog import PARSERS, get_parser
+from stele.parsers.catalog import ML_REPLAY_POLICY, PARSERS, get_parser
+from stele.parsers.replay import record_parser_run, replay_spec
+from stele.replay.engine import ReplayOutcome, replay_record
+from stele.replay.parsers import ParserCatalog
+from tests.ledger_helpers import open_ledger
 
 requires_posix_staging = pytest.mark.skipif(
     not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "fwalk"),
@@ -370,3 +378,120 @@ class TestLive:
         run = run_parser(_probe(code), doc, tmp_path / "out", backend=backend, timeout_seconds=5)
         assert run.result.timed_out and "timed out" in run.failure
         assert list((tmp_path / "out").iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Ledger and replay (roadmap #12, #14)
+# ---------------------------------------------------------------------------
+
+@requires_posix_staging
+class TestReplay:
+    """Packaged ML parsers are replayed under their comparison policy: never
+    REPRODUCED, EQUIVALENT within policy, DIVERGED outside it."""
+
+    POLICY_PARSER = replace(PARSER, comparison=ML_REPLAY_POLICY)
+    LAYOUT = {"page": 1, "bbox": [72.0, 90.25, 300.5, 120.0], "text": "Quarterly report"}
+
+    def _record(self, tmp_path: Path, doc: Path, write: dict[str, bytes]):
+        ledger = open_ledger(tmp_path / "ledger.db")
+        run = run_parser(
+            self.POLICY_PARSER, doc, tmp_path / "out", config={"pages": "1-2"},
+            store=ledger.archive, backend=FakeBackend(write=write),
+        )
+        return ledger, record_parser_run(ledger, run, source=Source.from_path(doc))
+
+    def _replay(self, ledger, record, write: dict[str, bytes]):
+        backend = FakeBackend(write=write)
+        spec = replay_spec(self.POLICY_PARSER, backend=backend)
+        return replay_record(ledger, ParserCatalog([spec]), record), backend
+
+    def _files(self, layout: dict, markdown: bytes = b"# Quarterly report\n") -> dict[str, bytes]:
+        return {"document.md": markdown, "document.json": json.dumps(layout).encode()}
+
+    def test_every_packaged_parser_has_a_policy(self) -> None:
+        for parser in PARSERS.values():
+            assert parser.comparison is ML_REPLAY_POLICY
+            spec = replay_spec(parser)
+            assert (spec.name, spec.version) == (parser.name, parser.version)
+            assert not spec.deterministic and spec.policy is ML_REPLAY_POLICY
+
+    def test_run_is_recorded_with_its_identity(self, doc: Path, tmp_path: Path) -> None:
+        ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))
+        assert record.parser == ParserIdentityRecord("fake", "1.0", image_digest=DIGEST)
+        assert record.parser_config == {"mode": "fast", "pages": "1-2"}
+        assert record.source_path == Source.from_path(doc).locator
+
+    def test_replay_runs_the_recorded_config_and_is_only_equivalent(
+        self, doc: Path, tmp_path: Path
+    ) -> None:
+        files = self._files(self.LAYOUT)
+        ledger, record = self._record(tmp_path, doc, files)
+        result, backend = self._replay(ledger, record, files)
+
+        assert result.outcome is ReplayOutcome.EQUIVALENT  # identical bytes, still not REPRODUCED
+        assert result.policy == ML_REPLAY_POLICY.describe()
+        assert list(backend.seen.command) == list(PARSER.command)
+        assert json.loads(backend.seen.env[CONFIG_ENV]) == {"mode": "fast", "pages": "1-2"}
+        assert backend.seen.env["STELE_PARSER_DEVICE"] == "cpu"
+        assert backend.seen.env["OMP_NUM_THREADS"] == "2"
+
+    def test_float_noise_is_equivalent(self, doc: Path, tmp_path: Path) -> None:
+        ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))
+        noisy = {**self.LAYOUT, "bbox": [72.0000001, 90.25, 300.4999, 120.2]}
+        result, _ = self._replay(ledger, record, self._files(noisy))
+        assert result.outcome is ReplayOutcome.EQUIVALENT
+        assert result.differences == ("document.json",)
+
+    def test_moved_block_or_changed_text_is_diverged(self, doc: Path, tmp_path: Path) -> None:
+        ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))
+        moved = {**self.LAYOUT, "bbox": [72.0, 90.25, 310.0, 120.0]}
+        result, _ = self._replay(ledger, record, self._files(moved))
+        assert result.outcome is ReplayOutcome.DIVERGED
+        assert result.differences == (
+            "300.5 != 310.0 beyond tolerance: document.json/bbox[2]",
+        )
+        result, _ = self._replay(
+            ledger, record, self._files(self.LAYOUT, markdown=b"# Quarterly rep0rt\n")
+        )
+        assert result.outcome is ReplayOutcome.DIVERGED
+        assert result.differences == ("bytes differ: document.md",)
+
+    def test_image_not_present_is_unreplayable(self, doc: Path, tmp_path: Path) -> None:
+        ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))
+        # The real CPU backend: localhost/stele/fake:1.0 was never built here.
+        spec = replay_spec(self.POLICY_PARSER)
+        result = replay_record(ledger, ParserCatalog([spec]), record)
+        assert result.outcome is ReplayOutcome.UNREPLAYABLE
+        assert result.replay_run_id is None
+
+    def test_a_record_without_the_document_name_is_unreplayable(
+        self, doc: Path, tmp_path: Path
+    ) -> None:
+        """The replay input is named after the record's Source; a parser that
+        picks its reader by suffix cannot run under a generic name."""
+        ledger = open_ledger(tmp_path / "ledger.db")
+        files = self._files(self.LAYOUT)
+        run = run_parser(self.POLICY_PARSER, doc, tmp_path / "out", store=ledger.archive,
+                         backend=FakeBackend(write=files))
+        record = record_run(
+            ledger, run.result, parser=ParserIdentityRecord("fake", "1.0"),
+            parser_config=dict(run.identity.config),
+        )
+        result, backend = self._replay(ledger, record, files)
+        assert result.outcome is ReplayOutcome.UNREPLAYABLE
+        assert "original file name" in result.reason
+        assert backend.seen is None and result.replay_run_id is None
+
+    def test_record_parser_run_requires_the_source(self, doc: Path, tmp_path: Path) -> None:
+        ledger = open_ledger(tmp_path / "ledger.db")
+        run = run_parser(self.POLICY_PARSER, doc, tmp_path / "out", store=ledger.archive,
+                         backend=FakeBackend())
+        with pytest.raises(TypeError):
+            record_parser_run(ledger, run)
+
+    def test_a_parser_without_a_policy_is_unreplayable(self, doc: Path, tmp_path: Path) -> None:
+        ledger, record = self._record(tmp_path, doc, self._files(self.LAYOUT))
+        spec = replay_spec(PARSER, backend=FakeBackend(write=self._files(self.LAYOUT)))
+        result = replay_record(ledger, ParserCatalog([spec]), record)
+        assert result.outcome is ReplayOutcome.UNREPLAYABLE
+        assert "no comparison policy" in result.reason

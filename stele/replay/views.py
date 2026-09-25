@@ -21,18 +21,21 @@ class LedgerViews:
         return self._store.list_by_states(list(ArtifactState))
 
     def pending(self) -> list[ArtifactRecord]:
-        """Records that have been emitted and hashed but not yet committed."""
+        """Records that have been emitted and hashed but not yet sealed."""
         return self._store.list_by_states([ArtifactState.PENDING])
 
-    def committed(self) -> list[ArtifactRecord]:
-        """Records whose downstream writes were confirmed."""
-        return self._store.list_by_states([ArtifactState.COMMITTED])
+    def sealed(self) -> list[ArtifactRecord]:
+        """Records whose artifact bundle is archived and verified.
+
+        Sealed says nothing about delivery to downstream targets (#13).
+        """
+        return self._store.list_by_states([ArtifactState.SEALED])
 
     def invalidated_or_failed(self) -> list[ArtifactRecord]:
         """Records that are no longer trustworthy.
 
         Includes both INVALIDATED (retroactively marked stale) and FAILED
-        (parser or commit error).  Downstream adapters should use this view
+        (parser or sealing error).  Downstream adapters should use this view
         to tombstone data they previously wrote.
         """
         return self._store.list_by_states(

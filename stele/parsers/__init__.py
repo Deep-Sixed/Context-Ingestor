@@ -16,6 +16,9 @@ network, read-only root, staged input, output only under /stele/output) plus:
 - Identity. Every run records the image's content digest and a digest of the
   exact parser configuration it was given, for the ledger (#12) and replay
   (#14).
+- Replay. ML parsers are not deterministic, so each ParserImage carries an
+  explicit comparison policy under which a replay counts as EQUIVALENT
+  (stele.parsers.replay; never REPRODUCED).
 
 The images are built in a separate, trusted step (``parsers/`` holds their
 build files and ``python -m stele.parsers build-command`` prints the command).
@@ -45,6 +48,7 @@ from ..containment.sandbox import SandboxConfig
 
 if TYPE_CHECKING:
     from ..archive.store import BlobStore
+    from ..replay.policy import ComparisonPolicy
 
 __all__ = [
     "GpuPolicy",
@@ -122,6 +126,10 @@ class ParserImage:
     # Build context and Containerfile, relative to the repository root.
     build_context: str = "parsers"
     containerfile: str = ""
+    # How a replay of this parser is judged (roadmap #14). Required for replay:
+    # the parser is not deterministic, so without a policy its records are
+    # UNREPLAYABLE.
+    comparison: ComparisonPolicy | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "config", MappingProxyType(dict(self.config)))

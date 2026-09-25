@@ -17,7 +17,9 @@ For every parser named in STELE_PARSER_IMAGES:
     naming the parser, version, configuration and output roles);
   - the run's identity records the image digest and configuration digest;
   - an image without model weights fails cleanly with exit status 3, without
-    trying to download anything, and keeps no output.
+    trying to download anything, and keeps no output;
+  - a recorded run replayed on the same image is EQUIVALENT under the
+    parser's comparison policy, never REPRODUCED (roadmap #14).
 
 The containment proofs (tests/test_containment.py) run against the
 same images via STELE_PROOF_IMAGES.
@@ -189,3 +191,28 @@ def test_time_limit_is_a_clean_failure(name: str, tmp_path: Path) -> None:
     run = run_parser(parser, DOCS / doc, out, backend=_cpu_backend(name), timeout_seconds=3)
     assert run.result.timed_out and "timed out after 3s" in run.failure
     assert list(out.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_replay_is_equivalent_never_reproduced(name: str, tmp_path: Path) -> None:
+    """Roadmap #14: a real ML parser replayed on its recorded Snapshot, with its
+    recorded config and image, lands within its comparison policy."""
+    from stele.archive import Source
+    from stele.ledger.store import LedgerStore
+    from stele.parsers.replay import record_parser_run, replay_spec
+    from stele.replay.engine import ReplayOutcome, replay_record
+    from stele.replay.parsers import ParserCatalog
+
+    parser = get_parser(name)
+    doc = "text_only.pdf"
+    ledger = LedgerStore(tmp_path / "ledger.db", BlobStore(tmp_path / "archive"))
+    run = run_parser(parser, DOCS / doc, tmp_path / "out", store=ledger.archive,
+                     backend=_cpu_backend(name))
+    assert run.succeeded, f"{run.failure}\n--- stderr ---\n{run.result.stderr[-4000:]}"
+    record = record_parser_run(ledger, run, source=Source.from_path(DOCS / doc))
+
+    spec = replay_spec(parser, backend=_cpu_backend(name))
+    result = replay_record(ledger, ParserCatalog([spec]), record)
+
+    assert result.outcome is ReplayOutcome.EQUIVALENT, (result.reason, result.differences)
+    assert result.policy == parser.comparison.describe()
