@@ -63,6 +63,8 @@ def run() -> None:
     # Models come only from the image; MinerU must never try a download.
     os.environ["MINERU_MODEL_SOURCE"] = "local"
     se.require_models(_model_paths(config["tier"]))
+    # The image links MinerU's model lock directory here (see Containerfile).
+    Path("/tmp/mineru-locks").mkdir(exist_ok=True)
 
     from importlib.metadata import version as dist_version
 
