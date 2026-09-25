@@ -178,6 +178,14 @@ conversation, each holding the exact bytes of its element of
   `current_node` that doesn't exist, or a bundle from another parser. The
   Dispatcher records the failure and writes nothing.
 
+### Canonical extraction (`stele/adapters/extraction.py`)
+
+`ExtractionAdapter` delivers the `stele.extraction` v1 units of any bundle
+that has a normalizer: Markdown from MinerU, Marker and Docling, and ChatGPT
+conversations. It emits one chunk per unit, with its kind, order, section
+parent and anchor. Before returning, it verifies every unit against the
+sealed bytes with the trusted resolver. See [extraction.md](extraction.md).
+
 ## Invariants proven
 
 | Proof | Test class |
