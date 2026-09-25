@@ -199,7 +199,10 @@ class TestArgv:
     def test_landlock_launcher_wraps_command(self, tmp_path: Path) -> None:
         launch = LandlockLaunch(python="/usr/bin/python3", script="/host/landlock.py")
         argv = BubblewrapSandbox().build_argv(
-            self._config(tmp_path, exec_allowlist=["/usr/bin/tesseract"]), landlock=launch,
+            self._config(
+                tmp_path, exec_allowlist=["/usr/bin/tesseract"], writable_scratch=False,
+            ),
+            landlock=launch,
         )
         assert argv[argv.index("/host/landlock.py") + 1] == SANDBOX_LANDLOCK
         tail = argv[argv.index("--") + 1:]
@@ -217,6 +220,15 @@ class TestArgv:
         )
         i = argv.index("/tmp", argv.index(SANDBOX_LANDLOCK, argv.index("--")))
         assert argv[i - 1] == "--write"
+
+    def test_scratch_is_writable_by_default(self, tmp_path: Path) -> None:
+        # Each run gets its own ephemeral /tmp, as on the container backend.
+        assert SandboxConfig(command=["x"], artifact_dir=tmp_path).writable_scratch is True
+        launch = LandlockLaunch(python="/usr/bin/python3", script="/host/landlock.py")
+        argv = BubblewrapSandbox().build_argv(self._config(tmp_path), landlock=launch)
+        tail = argv[argv.index("--") + 1:]
+        policy = tail[5:tail.index("--")]
+        assert policy[policy.index("/tmp") - 1] == "--write"
 
 
 class TestLauncherUnits:
@@ -364,10 +376,18 @@ class TestLandlockLive:
         assert result.succeeded, result.stderr
         assert "landlock" in result.hardening
 
-    @pytest.mark.parametrize("path", ["/tmp/x", "/home/x", "/var/x", "/run/x", "/root/x"])
+    @pytest.mark.parametrize("path", ["/home/x", "/var/x", "/run/x", "/root/x"])
     def test_writes_to_writable_tmpfs_are_refused(self, tmp_path: Path, path: str) -> None:
         # The mount layout makes these writable tmpfs; only Landlock stops them.
         result = _run(tmp_path, self._write(path))
+        assert "blocked 13" in result.stdout, result.stdout + result.stderr
+
+    def test_tmp_is_writable_by_default(self, tmp_path: Path) -> None:
+        result = _run(tmp_path, self._write("/tmp/x"))
+        assert "WROTE" in result.stdout, result.stdout + result.stderr
+
+    def test_tmp_refused_when_scratch_disabled(self, tmp_path: Path) -> None:
+        result = _run(tmp_path, self._write("/tmp/x"), writable_scratch=False)
         assert "blocked 13" in result.stdout, result.stdout + result.stderr
 
     def test_output_dir_and_dev_null_stay_writable(self, tmp_path: Path) -> None:

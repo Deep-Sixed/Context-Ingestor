@@ -64,9 +64,12 @@ class SandboxConfig:
     exec_allowlist: list[str] = field(default_factory=list)
 
     # Let the parser write to the ephemeral /tmp tmpfs as well as
-    # /stele/output. Off by default: where Landlock is enforced, writes are
-    # possible only under /stele/output. /tmp is never persisted either way.
-    writable_scratch: bool = False
+    # /stele/output. On by default, matching the container backend: real
+    # parsers (MinerU, Marker, Docling, anything using tempfile) need scratch
+    # space. Each run gets its own /tmp, which is discarded when the sandbox
+    # exits, so nothing written there is ever persisted or seen by another
+    # run. Set False to allow writes only under /stele/output.
+    writable_scratch: bool = True
 
 
 @dataclass(frozen=True)

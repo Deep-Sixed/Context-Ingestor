@@ -212,8 +212,8 @@ class TestNoDurableWriteOutsideArtifactDir:
     """
 
     def test_tmp_write_is_ephemeral(self, tmp_path: Path) -> None:
-        # writable_scratch opts in to /tmp writes (Landlock refuses them by
-        # default); even then they must never reach the host.
+        # /tmp is writable scratch by default (writable_scratch=True); writes
+        # there must still never reach the host.
         config = SandboxConfig(
             command=[PYTHON, "/stele/parser"],
             artifact_dir=tmp_path / "artifacts",
