@@ -339,7 +339,7 @@ class TestLive:
         assert seen == {"config": {"k": 1}, "omp": "1", "input": "%PDF-1.7 fake"}
         assert run.identity.image_digest and run.identity.image_digest.startswith("sha256:")
 
-    def test_memory_limit_is_a_clean_failure(self, engine, doc, tmp_path) -> None:
+    def test_memory_limit_is_a_clean_failure(self, engine, doc, tmp_path, monkeypatch) -> None:
         backend = _live_backend(engine, memory="128m", cpus=1.0)
         store = BlobStore(tmp_path / "store")
         code = (
@@ -348,11 +348,17 @@ class TestLive:
             # b'x' * n writes every page (calloc'd zero pages would not count).
             "hog = [b'x' * (16 * 1024 * 1024) for _ in range(64)]"  # 1 GiB > 128m
         )
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
         run = run_parser(_probe(code), doc, tmp_path / "out", store=store, backend=backend)
         assert not run.succeeded
         assert "memory limit" in run.failure, (run.failure, run.result.stderr)
         assert list((tmp_path / "out").iterdir()) == []
         assert run.result.artifact_bundle_digest is None
+        # Nothing lands in the caller's working directory (Podman's conmon
+        # writes an "oom" file into its own working directory on OOM kills).
+        assert list(cwd.iterdir()) == []
 
     def test_timeout_is_a_clean_failure(self, engine, doc, tmp_path) -> None:
         backend = _live_backend(engine, memory="256m", cpus=1.0)
