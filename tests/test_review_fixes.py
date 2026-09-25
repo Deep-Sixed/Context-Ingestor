@@ -23,6 +23,7 @@ from stele.containment.artifacts import UnsafeArtifactError, collect_artifact_pa
 from stele.containment.result import SandboxResult
 from stele.containment.runner import run_in_sandbox
 from stele.containment.sandbox import SandboxConfig
+from stele.containment.telemetry import FailureReason
 from stele.ledger.models import ArtifactState
 from stele.ledger.store import (
     ArtifactDriftError,
@@ -114,8 +115,12 @@ class TestUnreadableOutputDirectory:
         )
         out = tmp_path / "out"
         try:
-            with pytest.raises(UnsafeArtifactError, match="unreadable"):
-                run_in_sandbox(SandboxConfig(command=[PYTHON, "-c", probe], artifact_dir=out))
+            # #11: unsafe output is a structured failure, and it is removed
+            # even though the parser locked a directory against its owner.
+            result = run_in_sandbox(SandboxConfig(command=[PYTHON, "-c", probe], artifact_dir=out))
+            assert result.failure.reason is FailureReason.UNSAFE_ARTIFACT
+            assert "unreadable" in result.failure.detail
+            assert result.artifact_paths == [] and not out.exists()
         finally:
             if (out / "hidden").exists():
                 (out / "hidden").chmod(0o700)

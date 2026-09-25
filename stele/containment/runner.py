@@ -26,9 +26,10 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from .artifacts import collect_artifact_paths, discard_artifact_dir_contents
+from .artifacts import UnsafeArtifactError, collect_artifact_paths, discard_artifact_dir_contents
 from .backend import (
     BWRAP_MISSING as _BWRAP_MISSING,
+    ExecutionOutcome,
     ParserRequirements,
     SandboxBackend,
     SandboxUnavailableError,
@@ -38,6 +39,13 @@ from .backend import (
 from .result import SandboxResult
 from .sandbox import SandboxConfig
 from .staging import stage_input
+from .telemetry import (
+    FailureReason,
+    RunFailure,
+    RunTelemetry,
+    exit_status_failure,
+    timeout_failure,
+)
 
 if TYPE_CHECKING:
     from ..archive.records import Snapshot
@@ -63,7 +71,6 @@ def run_in_sandbox(
     requirements: ParserRequirements | None = None,
     backend: SandboxBackend | None = None,
     store: BlobStore | None = None,
-    discard_failed_output: bool = False,
 ) -> SandboxResult:
     """Execute config.command in a sandbox and return the result.
 
@@ -87,11 +94,16 @@ def run_in_sandbox(
     and every collected artifact is stored by digest, together with a tree
     object over the artifact manifest. Paths in the result stay locations only.
 
-    With discard_failed_output=True, a run that did not succeed (non-zero exit,
-    timeout, or a kill such as the memory limit) keeps nothing it wrote: the
-    artifact directory is emptied, no artifacts are collected, and nothing is
-    stored, so a partial extraction can never be recorded. The input Snapshot
-    is still archived, since it records what the parser was given.
+    Every result carries normalized telemetry (roadmap #11), and a run that
+    did not succeed carries a structured failure reason (timeout, out of
+    memory, CPU limit, blocked syscall, Wasm trap, crash, exit status, engine
+    error, or unsafe output such as a symlink, FIFO or unreadable directory).
+
+    A failed run keeps nothing it wrote: the artifact directory is emptied (and
+    removed if this run created it), no artifacts are collected, and nothing
+    is stored, so a partial extraction can never be recorded. The staging copy
+    is always removed. The input Snapshot is still archived, since it records
+    what the parser was given.
     """
     if store is not None:
         from ..archive.ingest import ingest_artifacts, snapshot_staged_input
@@ -108,6 +120,7 @@ def run_in_sandbox(
     chosen = select_backend(requirements, None if backend is None else [backend])
 
     run_id = uuid4()
+    created_artifact_dir = not config.artifact_dir.exists()
     runtime_config = config
     input_sha256: str | None = None
     input_snapshot: Snapshot | None = None
@@ -127,22 +140,42 @@ def run_in_sandbox(
                 # staging copy is cleaned up.
                 input_snapshot = snapshot_staged_input(store, staged)
 
-        outcome = chosen.execute(runtime_config)
+        try:
+            outcome = chosen.execute(runtime_config)
+        except BaseException:
+            _remove_output(config.artifact_dir, created_artifact_dir)
+            raise
     finally:
         if staging is not None:
             staging.cleanup()
 
-    failed = outcome.exit_code != 0 or outcome.timed_out
-    if discard_failed_output and failed:
-        discard_artifact_dir_contents(config.artifact_dir)
-        artifact_paths: list[Path] = []
-    else:
-        artifact_paths = collect_artifact_paths(config.artifact_dir)
+    failure = outcome.failure or _generic_failure(outcome, config)
+    artifact_paths: list[Path] = []
+    if failure is None:
+        try:
+            artifact_paths = collect_artifact_paths(config.artifact_dir)
+        except UnsafeArtifactError as exc:
+            failure = RunFailure(FailureReason.UNSAFE_ARTIFACT, str(exc), exit_code=outcome.exit_code)
+    if failure is not None:
+        artifact_paths = []
+        _remove_output(config.artifact_dir, created_artifact_dir)
+
     artifact_digests: dict[str, str] = {}
     artifact_bundle_digest: str | None = None
-    if store is not None and not (discard_failed_output and failed):
+    if store is not None and failure is None:
         artifact_digests = ingest_artifacts(store, config.artifact_dir, artifact_paths)
         artifact_bundle_digest = store.put_tree(artifact_digests)
+
+    telemetry = RunTelemetry(
+        backend=chosen.name,
+        runtime=outcome.runtime,
+        wall_time_seconds=outcome.wall_time_seconds,
+        exit_code=outcome.exit_code,
+        cpu_time_seconds=outcome.cpu_time_seconds,
+        peak_memory_bytes=outcome.peak_memory_bytes,
+        limits=outcome.limits or {"timeout_seconds": config.timeout_seconds},
+        counters=outcome.counters,
+    )
 
     return SandboxResult(
         run_id=run_id,
@@ -152,7 +185,11 @@ def run_in_sandbox(
         artifact_paths=artifact_paths,
         artifact_dir=config.artifact_dir,
         wall_time_seconds=outcome.wall_time_seconds,
-        timed_out=outcome.timed_out,
+        # The engine can enforce the deadline itself (podman's conmon) and win
+        # the race; the failure reason is the authority.
+        timed_out=outcome.timed_out or (
+            failure is not None and failure.reason is FailureReason.TIMEOUT
+        ),
         input_sha256=input_sha256,
         backend=chosen.name,
         image_digest=outcome.image_digest,
@@ -162,7 +199,30 @@ def run_in_sandbox(
         input_snapshot=input_snapshot,
         artifact_digests=artifact_digests,
         artifact_bundle_digest=artifact_bundle_digest,
+        telemetry=telemetry,
+        failure=failure,
     )
+
+
+def _generic_failure(outcome: ExecutionOutcome, config: SandboxConfig) -> RunFailure | None:
+    """A reason for backends that do not classify their own failures."""
+    if outcome.timed_out:
+        return timeout_failure(config.timeout_seconds, outcome.exit_code, "the run was stopped")
+    if outcome.violation:
+        return RunFailure(FailureReason.SYSCALL_BLOCKED, outcome.violation, exit_code=outcome.exit_code)
+    if outcome.exit_code != 0:
+        return exit_status_failure(outcome.exit_code)
+    return None
+
+
+def _remove_output(artifact_dir: Path, created: bool) -> None:
+    """Remove everything a failed run wrote, and the directory if the run made it."""
+    try:
+        discard_artifact_dir_contents(artifact_dir)
+        if created:
+            artifact_dir.rmdir()
+    except FileNotFoundError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +292,12 @@ def _main() -> None:
         "image_digest": result.image_digest,
         "hardening": list(result.hardening),
         "violation": result.violation,
+        "failure": None if result.failure is None else {
+            "reason": result.failure.reason.value,
+            "detail": result.failure.detail,
+            "signal": result.failure.signal_name,
+        },
+        "telemetry": result.telemetry.to_dict() if result.telemetry else None,
         "input_sha256": result.input_sha256,
         "module_sha256": result.module_sha256,
         "artifact_paths": [str(p) for p in result.artifact_paths],

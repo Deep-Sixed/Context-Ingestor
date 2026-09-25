@@ -356,7 +356,6 @@ def run_parser(
         requirements=requirements,
         backend=chosen,
         store=store,
-        discard_failed_output=True,
     )
     identity = ParserIdentity(
         parser=parser.name,

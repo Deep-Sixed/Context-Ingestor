@@ -175,7 +175,8 @@ class TestRunParser:
         assert run.result.artifact_paths == []
         assert run.result.artifact_digests == {}
         assert run.result.artifact_bundle_digest is None
-        assert out.is_dir() and list(out.iterdir()) == []
+        assert not out.exists()  # the run created it, so the failure removed it
+        assert run.result.failure is not None
         # The input is still evidence of what the parser was given.
         assert run.result.input_snapshot is not None
         assert run.result.input_snapshot.digest == run.result.input_sha256

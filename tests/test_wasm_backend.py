@@ -36,6 +36,7 @@ from stele.containment.backend import (
 )
 from stele.containment.runner import run_in_sandbox
 from stele.containment.sandbox import SandboxConfig
+from stele.containment.telemetry import FailureReason
 from stele.containment.wasm import (
     CLOCK_STEP_NS,
     FIXED_EPOCH_NS,
@@ -359,9 +360,12 @@ class TestWasmLimits:
         assert result.exit_code == WASM_TRAP_EXIT_CODE
         assert not result.timed_out
         assert "unreachable" in result.stderr
-        # 4 MiB of 64 KiB pages: growth was refused exactly at the cap.
-        (pages,) = struct.unpack("<I", (result.artifact_dir / "pages.bin").read_bytes())
-        assert pages == 64
+        # Growth was refused exactly at the cap (4 MiB = 64 pages of 64 KiB),
+        # and the trap at the cap is reported as out of memory (#11). The
+        # failed run's output is removed, so the evidence is the telemetry.
+        assert result.telemetry.peak_memory_bytes == 4 * MiB
+        assert result.failure.reason is FailureReason.OUT_OF_MEMORY
+        assert not result.artifact_dir.exists()
 
     def test_initial_memory_over_the_cap_fails(self, tmp_path: Path, wasm_backend) -> None:
         wat = tmp_path / "big.wat"

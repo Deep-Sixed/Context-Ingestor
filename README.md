@@ -58,6 +58,14 @@ re-hash of working copies) is a separate operation. A frozen-Snapshot harness
 proves the Wasm extractor reproduces byte for byte on Linux, macOS and
 Windows. See `docs/G-replay.md`.
 
+**Run telemetry and faults (#11):** every run result carries the same
+telemetry from every backend: wall and CPU time, peak memory, exit status,
+the limits applied, and the backend and runtime that ran it. A measurement a
+backend can't make is `None`. A failed run carries one structured reason:
+timeout, out of memory, CPU limit, blocked syscall, Wasm trap, crash, exit
+status, engine error or unsafe output. A failed or killed run leaves no
+output, staging copy, process or container behind. See `docs/E-containment.md`.
+
 ## Gate
 
 **RAG-ANYTHING: PROCEED — Stele-gated ingestion with scoped tombstone support.**

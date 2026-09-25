@@ -237,6 +237,54 @@ one's byte offset and length in the input. Run it with
 with a probe module (`tests/fixtures/wasm/probe.wat`) and checks that the
 extractor's output digest is identical on Linux, macOS and Windows.
 
+### Telemetry, failure reasons and cleanup (roadmap #11)
+
+Every `SandboxResult` carries `telemetry` (`stele/containment/telemetry.py`),
+the same fields whatever backend ran it:
+
+| Field | bubblewrap | OCI (runc / gVisor) | Wasmtime |
+|---|---|---|---|
+| `backend`, `runtime` | `bubblewrap`, `bwrap` | `oci-runc`…, `docker/runsc`… | `wasmtime`, `wasmtime <version>` |
+| `wall_time_seconds`, `exit_code` | measured | measured | measured |
+| `cpu_time_seconds` | user + system of the whole tree (`wait4`) | `None`: the `--rm` container takes its accounting with it | guest thread CPU time |
+| `peak_memory_bytes` | peak RSS of the largest process (`wait4`) | `None` (as above) | linear memory at exit (it never shrinks) |
+| `limits` | `timeout_seconds` | `timeout_seconds`, `memory`, `cpus`, `pids`, `tmpfs`, `gpu` | `timeout_seconds`, `memory_bytes`, `fuel`, `output_bytes` |
+| `counters` | — | — | `fuel_consumed` |
+
+A value a backend cannot measure is `None`, never zero.
+
+A run that does not succeed carries exactly one `failure` (`RunFailure`: a
+`FailureReason`, a one-line `detail`, the exit code and any signal):
+
+| Reason | Where it comes from |
+|---|---|
+| `timeout` | wall-clock limit: process tree killed (bubblewrap), container force-removed or killed by the engine at the deadline (OCI), epoch interrupt (Wasm) |
+| `out_of_memory` | SIGKILL (137) at the container memory limit; a Wasm trap with linear memory at the cap, or a module whose initial memory exceeds it |
+| `cpu_limit` | Wasm fuel budget exhausted |
+| `syscall_blocked` | killed by the seccomp filter (SIGSYS, #6) |
+| `wasm_trap` | any other Wasm trap (`unreachable`, out-of-bounds, …) |
+| `crashed` | the parser died from a signal (SIGSEGV, SIGABRT, …); the signal is reported |
+| `exit_status` | the parser exited non-zero on its own |
+| `engine_error` | the sandbox could not start the parser: container engine statuses 125–127, a Wasm module that cannot be loaded or linked |
+| `unsafe_artifact` | the output held a symlink, FIFO, device or unreadable directory; the run is refused instead of raising |
+
+**Enforcement.**
+- bubblewrap runs in its own process group. At the deadline the whole group is
+  killed. `--die-with-parent` and the PID namespace take every process in the
+  sandbox with it, including helpers that started their own session.
+- A timed-out container is force-removed.
+- Wasm stops at its fuel budget or at the epoch deadline.
+
+**Cleanup.**
+- The staging copy of the input is always removed.
+- Containers run with `--rm`, or are force-removed on timeout.
+- The engine's working directory is a private temporary directory.
+- A failed run keeps no output. The artifact directory is emptied, including
+  directories the parser locked with `chmod 000`, and removed when the run
+  created it. Nothing is collected or stored, so partial output can never be
+  recorded. `tests/test_run_faults.py` injects each fault on every backend and
+  checks that no output, staging directory, process or container is left.
+
 ## Inputs allowed inside sandbox
 
 - designated regular input file, copied first into a private Stele-owned staging directory and then mounted read-only
@@ -257,6 +305,8 @@ extractor's output digest is identical on Linux, macOS and Windows.
 - `stele/containment/landlock.py` — Landlock probe and in-sandbox launcher (write + exec rules)
 - `stele/containment/runner.py` — `run_in_sandbox()`, CLI entry point
 - `stele/containment/result.py` — `SandboxResult`
+- `stele/containment/telemetry.py` — `RunTelemetry`, `RunFailure`, `FailureReason` (#11)
+- `tests/test_run_faults.py` — fault injection per backend, telemetry, cleanup (#11)
 - `tests/test_phase_e_containment.py` — 16 live/structural containment tests
 - `tests/test_input_staging.py` — 4 trusted-input staging regression tests
 - `tests/test_artifact_boundary.py` — 3 trusted-output artifact regressions
