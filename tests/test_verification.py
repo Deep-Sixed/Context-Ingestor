@@ -62,6 +62,7 @@ from stele.verification.report import (
     RECOVERED,
     REGRESSION,
 )
+from stele.verification.campaign import SEALED
 from tests.ledger_helpers import open_ledger
 
 # ---------------------------------------------------------------------------
@@ -388,6 +389,61 @@ class TestReport:
         report = _report(campaign, ledger, corpus, root)
         gate = _gate(report, "records_verified")
         assert not gate["passed"] and "invalidated" in gate["examples"][0]
+
+    def _forge_journal(self, campaign, rewrite) -> Journal:
+        """Rewrite the journal's observations (not its header) and reopen it."""
+        path = campaign.journal.path
+        header, *lines = path.read_text().splitlines()
+        observations = [json.loads(line) for line in lines]
+        forged = [header, *(json.dumps(o, sort_keys=True) for o in rewrite(observations))]
+        path.write_text("\n".join(forged) + "\n")
+        return Journal.read(path)
+
+    def test_a_lane_cannot_claim_another_lanes_record(self, tmp_path) -> None:
+        """A candidate that diverges cannot pass by citing the baseline's records."""
+        campaign, ledger, corpus, root = _campaign(tmp_path, [_lane("base", honest),
+                                                              _lane("cand", wrong)])
+        campaign.run()
+        assert not _gate(_report(campaign, ledger, corpus, root), "candidates_agree")["passed"]
+
+        def cite_baseline(observations):
+            base = {o["path"]: o for o in observations if o["lane"] == "base"}
+            return [
+                dict(base[o["path"]], lane="cand")
+                if o["lane"] == "cand" and base[o["path"]]["status"] == SEALED else o
+                for o in observations
+            ]
+
+        journal = self._forge_journal(campaign, cite_baseline)
+        report = build_report(ledger, corpus, journal, root=root)
+        gate = _gate(report, "records_verified")
+        assert not report.passed and not gate["passed"]
+        assert any("not on lane cand's backend" in e for e in gate["examples"])
+        assert any("already the result of" in e for e in gate["examples"])
+        with pytest.raises(SignOffRefused, match="records_verified"):
+            sign_off(ledger, report, corpus=corpus, journal=journal, root=root,
+                     signed_off_by="reviewer")
+
+    def test_a_record_made_with_another_config_is_refused(self, tmp_path) -> None:
+        campaign, ledger, corpus, root = _campaign(tmp_path, [_lane("base", honest)])
+        campaign.run()
+        other, *_ = _campaign(tmp_path, [_lane("base", honest)], root=root, ledger=ledger,
+                              journal="other.jsonl", parser_config={"mode": "lenient"})
+        other.run()
+        swapped = {o.path: o for o in other.journal.observations}
+
+        def use_other_config(observations):
+            return [
+                {**o, **{k: getattr(swapped[o["path"]], k)
+                         for k in ("run_id", "record_id", "artifact_hash")}}
+                if o["status"] == SEALED else o
+                for o in observations
+            ]
+
+        journal = self._forge_journal(campaign, use_other_config)
+        gate = _gate(build_report(ledger, corpus, journal, root=root), "records_verified")
+        assert not gate["passed"]
+        assert any("another parser configuration" in e for e in gate["examples"])
 
     def test_tampered_evidence_fails_the_report(self, tmp_path) -> None:
         campaign, ledger, corpus, root = _campaign(tmp_path, [_lane("base", honest)])

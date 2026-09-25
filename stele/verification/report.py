@@ -6,7 +6,9 @@ run failed, how long it took). Everything a journal line claims about a sealed
 run is re-checked against the ledger and the evidence archive:
 
 - the record exists, is still SEALED, and is the run the journal names
-  (run id, artifact hash, parser name and version);
+  (run id, artifact hash, parser name and version), made on the backend of
+  the lane that claims it with the campaign's parser configuration, and no
+  other document or lane claims the same record;
 - its source_hash is the corpus manifest's SHA-256 for that document;
 - its bundle re-verifies in the archive (validate_artifact);
 - where the parser has an extraction normalizer, the canonical extraction
@@ -49,7 +51,9 @@ from ..ledger.models import ArtifactState
 from ..ledger.store import LedgerStore, RecordNotFoundError
 from ..replay.policy import ComparisonPolicy
 from ..replay.validator import validate_artifact
-from .campaign import CONTAINMENT_ERROR, ERROR, FAILED, NOT_APPLICABLE, SEALED, Journal, Observation
+from .campaign import (
+    CONTAINMENT_ERROR, ERROR, FAILED, NOT_APPLICABLE, SEALED, Journal, Observation, config_digest,
+)
 from .corpus import Corpus
 
 REPORT_SCHEMA = "stele.verification-report"
@@ -212,7 +216,11 @@ def build_report(
     for obs in journal.observations:
         by_doc.setdefault(obs.path, {})[obs.lane] = obs   # the latest observation wins
 
-    checker = _RecordChecker(ledger, parser, gates.check_extractions)
+    checker = _RecordChecker(
+        ledger, parser, gates.check_extractions,
+        backends={lane["name"]: lane["backend"] for lane in header["lanes"]},
+        config_digest=header["parser_config_digest"],
+    )
     documents: list[dict[str, Any]] = []
     waiver_index = {(w.path, w.lane, w.outcome): w for w in waivers}
     used: set[tuple[str, str, str]] = set()
@@ -339,10 +347,21 @@ def _lane_row(obs: Observation) -> dict[str, Any]:
 
 
 class _RecordChecker:
-    def __init__(self, ledger: LedgerStore, parser: Mapping[str, str], extractions: bool) -> None:
+    def __init__(
+        self,
+        ledger: LedgerStore,
+        parser: Mapping[str, str],
+        extractions: bool,
+        *,
+        backends: Mapping[str, str],
+        config_digest: str,
+    ) -> None:
         self.ledger = ledger
         self.parser = parser
         self.extractions = extractions
+        self.backends = backends          # lane name -> the backend that lane runs on
+        self.config_digest = config_digest
+        self.claimed: dict[str, str] = {}  # record_id -> "<path> [<lane>]" that cited it first
 
     def check(self, obs: Observation, sha256: str) -> tuple[Any, list[str], int | None]:
         """(record or None, problems, extraction unit count or None)."""
@@ -359,6 +378,21 @@ class _RecordChecker:
             self.parser["name"], self.parser["version"]
         ):
             problems.append(f"record {record.record_id} was made by another parser")
+        # The journal says which record a lane produced; the ledger must agree
+        # that this lane's backend made it, with the campaign's configuration,
+        # or one lane's output could stand in for another's.
+        expected = self.backends.get(obs.lane)
+        if record.backend != expected:
+            problems.append(
+                f"record {record.record_id} was made on {record.backend!r}, "
+                f"not on lane {obs.lane}'s backend {expected!r}"
+            )
+        if record.parser_config is None or config_digest(record.parser_config) != self.config_digest:
+            problems.append(f"record {record.record_id} was made with another parser configuration")
+        claimant = f"{obs.path} [{obs.lane}]"
+        first = self.claimed.setdefault(record.record_id, claimant)
+        if first != claimant:
+            problems.append(f"record {record.record_id} is already the result of {first}")
         if record.source_hash != sha256:
             problems.append(
                 f"record {record.record_id} read input {record.source_hash}, not the corpus document"

@@ -91,6 +91,9 @@ and how long it took. For every sealed run, the report re-checks:
 
 - the record exists, is still `SEALED`, and is the run the journal names
   (run id, artifact hash, parser name and version);
+- the ledger says it was made on the backend of the lane that claims it, with
+  the campaign's parser configuration, and no other document or lane claims
+  the same record (so one lane's output can never stand in for another's);
 - its `source_hash` is the corpus document's SHA-256;
 - its bundle re-verifies in the evidence archive;
 - where the parser has an extraction normalizer (Markdown from MinerU,
