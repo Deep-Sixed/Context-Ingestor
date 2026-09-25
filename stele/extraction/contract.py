@@ -22,7 +22,7 @@ bytes it came from.
       text                          the unit's content, exactly as its anchor resolves
       order                         0, 1, 2, ... (reading order)
       page, bbox, level             when the source knows them, else null
-      parent                        another unit's id (sections, conversation trees), or null
+      parent                        an earlier unit's id (sections, conversation trees), or null
       anchor                        where the text lives in the sealed bundle:
           {artifact, digest, range: [start, end]}                   a UTF-8 byte range, or
           {artifact, digest, pointer: "/json/pointer", render: R}   a JSON value rendered by R
@@ -136,7 +136,7 @@ class Unit:
         if self.page is not None and (type(self.page) is not int or self.page < 0):
             raise ExtractionFormatError(f"unit {self.id}: page must be a non-negative int")
         if self.bbox is not None:
-            if len(self.bbox) != 4 or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+            if not isinstance(self.bbox, (tuple, list)) or len(self.bbox) != 4 or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
                                               for v in self.bbox):
                 raise ExtractionFormatError(f"unit {self.id}: bbox must be four numbers")
             object.__setattr__(self, "bbox", tuple(float(v) for v in self.bbox))
@@ -166,7 +166,7 @@ class Unit:
         return cls(
             id=obj["id"], kind=obj["kind"], text=obj["text"], order=obj["order"],
             anchor=Anchor.from_json(obj["anchor"]), page=obj["page"],
-            bbox=tuple(obj["bbox"]) if obj["bbox"] is not None else None,
+            bbox=tuple(obj["bbox"]) if isinstance(obj["bbox"], list) else obj["bbox"],
             level=obj["level"], parent=obj["parent"], attributes=obj["attributes"],
         )
 
@@ -182,23 +182,32 @@ class Extraction:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "units", tuple(self.units))
+        if not isinstance(self.record_id, str) or not self.record_id:
+            raise ExtractionFormatError("record_id must be a non-empty string")
         if not is_digest(self.artifact_hash):
             raise ExtractionFormatError("artifact_hash is not a SHA-256 digest")
         if self.source_hash is not None and not is_digest(self.source_hash):
             raise ExtractionFormatError("source_hash is not a SHA-256 digest")
         for name in ("parser", "normalizer"):
             value = getattr(self, name)
-            if not isinstance(value, dict) or set(value) != {"name", "version"}:
-                raise ExtractionFormatError(f"{name} must be {{name, version}}")
+            if not isinstance(value, dict) or set(value) != {"name", "version"} \
+                    or not all(isinstance(v, str) for v in value.values()):
+                raise ExtractionFormatError(f"{name} must be {{name, version}} strings")
         ids = [u.id for u in self.units]
         if len(set(ids)) != len(ids):
             raise ExtractionFormatError("unit ids are not unique")
         if [u.order for u in self.units] != list(range(len(self.units))):
             raise ExtractionFormatError("units must be in reading order 0, 1, 2, ...")
-        known = set(ids)
+        # A parent comes earlier in reading order, so the units form a forest:
+        # no cycles, and a consumer can build the tree in one pass.
+        order_of = {u.id: u.order for u in self.units}
         for unit in self.units:
-            if unit.parent is not None and (unit.parent not in known or unit.parent == unit.id):
-                raise ExtractionFormatError(f"unit {unit.id}: parent {unit.parent!r} is not another unit")
+            if unit.parent is not None and not (
+                isinstance(unit.parent, str) and order_of.get(unit.parent, unit.order) < unit.order
+            ):
+                raise ExtractionFormatError(
+                    f"unit {unit.id}: parent {unit.parent!r} is not an earlier unit"
+                )
 
     def to_canonical(self) -> bytes:
         return canonical_json({

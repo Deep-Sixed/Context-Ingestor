@@ -29,7 +29,7 @@ Unit
   text                          the unit's content, exactly as its anchor resolves
   order                         0, 1, 2, ... (reading order)
   page, bbox, level             when the source knows them, else null
-  parent                        another unit's id (sections, conversation trees), or null
+  parent                        an earlier unit's id (sections, conversation trees), or null
   anchor                        where the text lives in the sealed bundle, one of:
       {artifact, digest, range: [start, end]}                   a UTF-8 byte range
       {artifact, digest, pointer: "/json/pointer", render: R}   a JSON value rendered by R
@@ -46,7 +46,8 @@ byte form and one digest. It refuses:
 - unknown or missing fields;
 - another schema or version;
 - an unknown kind or empty text;
-- units out of order, with duplicate ids, or with a parent that isn't another unit;
+- units out of order, with duplicate ids, or with a parent that isn't an earlier
+  unit (so the units always form a forest, never a cycle);
 - an anchor with both or neither of range and pointer, or a pointer with no renderer;
 - any bytes that are not the canonical encoding.
 
@@ -98,8 +99,9 @@ list means every unit checks out. The resolver trusts nothing the extraction
 says about itself:
 
 1. **The record.** It must be `SEALED` in the live ledger (or `INVALIDATED`
-   with `allow_invalidated=True`). The extraction's `artifact_hash` and
-   `source_hash` must be the record's.
+   with `allow_invalidated=True`). The extraction's `artifact_hash`,
+   `source_hash` and `parser` must be the record's, and its `normalizer` must
+   be the one registered for that parser.
 2. **The artifact.** The anchored artifact must be in the record's manifest,
    under the digest the anchor names.
 3. **The bytes.** They are read from the evidence archive, which re-hashes

@@ -159,6 +159,10 @@ class TestFormat:
         (lambda o: o["units"][0]["anchor"].update(digest="xyz"), "digest"),
         (lambda o: o["units"][0]["anchor"].update(render="json-string"), "no renderer"),
         (lambda o: o["units"].append(dict(o["units"][0], order=1)), "unique"),
+        (lambda o: o["units"][0].update(bbox=5), "bbox"),
+        (lambda o: o["units"][0].update(bbox="abcd"), "bbox"),
+        (lambda o: o.update(record_id=5), "record_id"),
+        (lambda o: o["parser"].update(version=1), "parser"),
     ])
     def test_invalid_extractions_are_refused(self, mutate, message) -> None:
         obj = json.loads(_extraction(_unit(0)).to_canonical())
@@ -166,6 +170,13 @@ class TestFormat:
         data = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
         with pytest.raises(ExtractionFormatError, match=message):
             Extraction.from_canonical(data)
+
+    def test_parents_come_earlier_so_there_are_no_cycles(self) -> None:
+        with pytest.raises(ExtractionFormatError, match="earlier unit"):
+            _extraction(_unit(0), _unit(1, parent="u000003"), _unit(2, parent="u000002"))
+        with pytest.raises(ExtractionFormatError, match="earlier unit"):
+            _extraction(_unit(0, parent="u000001"))
+        assert _extraction(_unit(0), _unit(1, parent="u000001"), _unit(2, parent="u000001"))
 
     def test_pointer_anchor_needs_a_renderer(self) -> None:
         with pytest.raises(ExtractionFormatError, match="renderer"):
@@ -285,6 +296,18 @@ class TestResolver:
         forged = _replace_unit(extraction, 0, anchor=dataclasses.replace(unit.anchor, **anchor_change))
         problems = Resolver(ledger).verify(forged)
         assert len(problems) == 1 and message in problems[0]
+
+    @pytest.mark.parametrize("change, message", [
+        (dict(parser={"name": "docling", "version": "1.0"}), "names parser"),
+        (dict(parser={"name": "marker", "version": "9"}), "names parser"),
+        (dict(normalizer={"name": "chatgpt", "version": "1"}), "names normalizer"),
+        (dict(normalizer={"name": "markdown", "version": "2"}), "names normalizer"),
+    ])
+    def test_forged_provenance_is_caught(self, tmp_path, change, message) -> None:
+        ledger, record = _sealed_markdown(tmp_path)
+        forged = dataclasses.replace(normalize(_bundle(ledger, record)), **change)
+        problems = Resolver(ledger).verify(forged)
+        assert problems and message in problems[0], problems
 
     def test_range_splitting_a_character_is_caught(self, tmp_path) -> None:
         ledger, record = _sealed_markdown(tmp_path)

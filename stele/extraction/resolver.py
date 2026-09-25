@@ -7,7 +7,8 @@ produced the extraction:
 
 - the record must be SEALED in the live ledger (INVALIDATED only when the
   caller asks for it explicitly), and the extraction must name that record's
-  artifact_hash;
+  artifact_hash, source_hash and parser, and the normalizer registered for
+  that parser;
 - the anchored artifact must be in the record's manifest under the digest the
   anchor names;
 - its bytes are read from the evidence archive, which re-hashes them;
@@ -30,7 +31,7 @@ from ..contracts.adapter import SealedBundle
 from ..ledger.models import ArtifactState
 from ..ledger.store import LedgerStore, RecordNotFoundError
 from .contract import Anchor, Extraction
-from .normalizers import CHATGPT_RENDERER
+from .normalizers import CHATGPT_RENDERER, NormalizeError, normalizer_id, parser_id
 
 
 class ResolutionError(ValueError):
@@ -160,6 +161,20 @@ class BundleResolver:
                 f"extraction names source_hash {extraction.source_hash}, "
                 f"the record has {self.bundle.source_hash}"
             )
+        if extraction.parser != parser_id(self.bundle):
+            problems.append(
+                f"extraction names parser {extraction.parser}, the record has {parser_id(self.bundle)}"
+            )
+        try:
+            expected = normalizer_id(self.bundle)
+        except NormalizeError as exc:
+            problems.append(str(exc))
+        else:
+            if extraction.normalizer != expected:
+                problems.append(
+                    f"extraction names normalizer {extraction.normalizer}, "
+                    f"the record's parser is normalized by {expected}"
+                )
         if problems:
             return problems
         for unit in extraction.units:

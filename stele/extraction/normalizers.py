@@ -62,14 +62,26 @@ def normalizer_for(bundle: SealedBundle) -> Callable[[SealedBundle], Extraction]
     raise NormalizeError(f"no extraction normalizer for parser {name!r}")
 
 
-def _extraction(bundle: SealedBundle, normalizer: dict[str, str], units: list[dict]) -> Extraction:
+def normalizer_id(bundle: SealedBundle) -> dict[str, str]:
+    """The {name, version} of the normalizer that normalize(bundle) uses."""
+    fn = normalizer_for(bundle)
+    return dict(MARKDOWN_NORMALIZER if fn is normalize_markdown else CHATGPT_NORMALIZER)
+
+
+def parser_id(bundle: SealedBundle) -> dict[str, str]:
+    """The {name, version} an extraction of this bundle names as its parser."""
     parser = bundle.parser
+    if parser is None:
+        return {"name": "unknown", "version": "unknown"}
+    return {"name": parser.name, "version": parser.version}
+
+
+def _extraction(bundle: SealedBundle, normalizer: dict[str, str], units: list[dict]) -> Extraction:
     return Extraction(
         record_id=bundle.record_id,
         artifact_hash=bundle.artifact_hash,
         source_hash=bundle.source_hash,
-        parser={"name": parser.name, "version": parser.version} if parser else
-               {"name": "unknown", "version": "unknown"},
+        parser=parser_id(bundle),
         normalizer=dict(normalizer),
         units=number_units(units),
     )
@@ -95,6 +107,8 @@ def markdown_path(bundle: SealedBundle) -> str:
             raise NormalizeError(f"{PARSER_MANIFEST} is malformed: {exc}") from exc
         path = outputs.get("markdown") if isinstance(outputs, dict) else None
         if path is not None:
+            if not isinstance(path, str):
+                raise NormalizeError(f"{PARSER_MANIFEST}: outputs.markdown is not a path")
             if path not in bundle.manifest:
                 raise NormalizeError(f"{PARSER_MANIFEST} names {path!r}, which is not in the bundle")
             return path
