@@ -46,7 +46,9 @@ requires_posix_staging = pytest.mark.skipif(
     reason="secure staging requires O_NOFOLLOW and os.fwalk",
 )
 
-BASE = {Capability.FILESYSTEM_ISOLATION, Capability.NETWORK_ISOLATION}
+ISOLATION = {Capability.FILESYSTEM_ISOLATION, Capability.NETWORK_ISOLATION}
+# What a default (host-process) parser needs.
+BASE = ISOLATION | {Capability.HOST_PROCESS}
 
 
 class FakeBackend(SandboxBackend):
@@ -80,8 +82,15 @@ class FakeBackend(SandboxBackend):
 
 class TestRequirements:
 
-    def test_default_requires_only_isolation(self) -> None:
-        assert ParserRequirements().required_capabilities() == BASE
+    def test_default_requires_isolation_and_a_process_host(self) -> None:
+        assert ParserRequirements().required_capabilities() == ISOLATION | {
+            Capability.HOST_PROCESS,
+        }
+
+    def test_wasm_parser_requires_a_wasm_host_instead(self) -> None:
+        assert ParserRequirements(wasm_module=True).required_capabilities() == ISOLATION | {
+            Capability.WASM_MODULE,
+        }
 
     def test_flags_map_to_capabilities(self) -> None:
         req = ParserRequirements(requires_gpu=True, requires_native_libs=True, deterministic=True)
@@ -99,9 +108,9 @@ class TestRequirements:
 
     def test_bubblewrap_claims_only_what_it_enforces(self) -> None:
         caps = BubblewrapBackend().capabilities()
-        assert caps == BASE | {Capability.NATIVE_LIBS}
+        assert caps == ISOLATION | {Capability.HOST_PROCESS, Capability.NATIVE_LIBS}
         for not_yet in (Capability.SYSCALL_FILTER, Capability.RESOURCE_LIMITS,
-                        Capability.GPU, Capability.DETERMINISTIC):
+                        Capability.GPU, Capability.DETERMINISTIC, Capability.WASM_MODULE):
             assert not_yet not in caps
 
 
@@ -132,6 +141,14 @@ class TestSelectBackend:
         a = FakeBackend("a", BASE, available=False, reason="needs Linux")
         with pytest.raises(SandboxUnavailableError, match="needs Linux"):
             select_backend(ParserRequirements(), [a])
+
+    def test_capable_but_unavailable_beside_incapable_is_sandbox_unavailable(self) -> None:
+        # A backend for another workload kind must not hide the real cause:
+        # the capable backend just cannot run on this host.
+        process = FakeBackend("process", BASE, available=False, reason="needs Linux")
+        wasm = FakeBackend("wasm", ISOLATION | {Capability.WASM_MODULE})
+        with pytest.raises(SandboxUnavailableError, match="needs Linux"):
+            select_backend(ParserRequirements(), [process, wasm])
 
     def test_no_backends_registered(self) -> None:
         with pytest.raises(UnsupportedBackendError, match="no sandbox backends"):

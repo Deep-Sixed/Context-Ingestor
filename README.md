@@ -72,6 +72,7 @@ Stele/
 ├── docs/                   ← phase specs (E–H)
 ├── stele/                  ← Python package
 │   ├── containment/
+│   ├── extractors/         ← Wasm extractors (run on the Wasmtime backend)
 │   ├── ledger/
 │   ├── replay/
 │   └── contracts/

@@ -6,6 +6,7 @@ Cross-platform behaviour (Linux, macOS, Windows).
   - The lstat fallback used where O_NOFOLLOW/dir_fd are missing (Windows)
     still refuses symlinked files and parent directories.
   - A host without bubblewrap gets a clear SandboxUnavailableError.
+  - Input staging without O_NOFOLLOW (Windows) refuses links and swaps.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 
 import stele.containment.runner as runner_module
+from stele.containment import staging
 from stele.containment.runner import SandboxUnavailableError, run_in_sandbox
 from stele.containment.sandbox import SandboxConfig
 from stele.ledger import hashing
@@ -150,3 +152,51 @@ def test_windows_junction_parent_is_refused(tmp_path: Path) -> None:
     _winapi.CreateJunction(str(outside), str(root / "d"))
     with pytest.raises(UnsafeFileError):
         hashing.sha256_file_beneath(root, Path("d/f.txt"))
+
+
+class TestStagingFallback:
+    """Input staging where O_NOFOLLOW is missing (Windows), run on every OS.
+
+    Wasm parsers run on Windows too, so their inputs must be stageable there.
+    """
+
+    @pytest.fixture(autouse=True)
+    def force_fallback(self, monkeypatch):
+        monkeypatch.setattr(staging, "RACE_FREE_NOFOLLOW", False)
+
+    def test_regular_file_is_staged_byte_exact(self, tmp_path: Path) -> None:
+        data = b"line one\r\nline two\n\x00\x1a binary tail"
+        source = tmp_path / "input.bin"
+        source.write_bytes(data)
+        staged = staging.stage_regular_file(source, tmp_path / "stage")
+        assert staged.staged_path.read_bytes() == data
+        assert staged.sha256 == hashlib.sha256(data).hexdigest()
+
+    def test_symlinked_file_is_refused(self, tmp_path: Path) -> None:
+        secret = tmp_path / "secret.txt"
+        secret.write_text("host secret")
+        _symlink_or_skip(tmp_path / "link.txt", secret)
+        with pytest.raises(staging.InputStagingError):
+            staging.stage_regular_file(tmp_path / "link.txt", tmp_path / "stage")
+
+    def test_file_swapped_after_check_is_refused(self, tmp_path: Path, monkeypatch) -> None:
+        source = tmp_path / "input.txt"
+        source.write_text("checked")
+        other = tmp_path / "other.txt"
+        other.write_text("swapped in")
+        real_open = os.open
+
+        def swapped_open(path, flags, *args, **kwargs):
+            if Path(path) == source:
+                path = other
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapped_open)
+        with pytest.raises(staging.InputStagingError, match="changed while being opened"):
+            staging.stage_regular_file(source, tmp_path / "stage")
+
+    def test_directory_inputs_are_refused(self, tmp_path: Path) -> None:
+        (tmp_path / "corpus").mkdir()
+        (tmp_path / "corpus" / "a.txt").write_text("a")
+        with pytest.raises(staging.InputStagingError, match="O_NOFOLLOW"):
+            staging.stage_directory(tmp_path / "corpus", tmp_path / "stage")
