@@ -7,8 +7,8 @@
 ## Goal
 
 Any ingestion run recorded in the Phase F ledger must be replayable and
-invalidatable. This gives MetaRouter and downstream consumers confidence
-that artifacts have a known, recoverable provenance.
+invalidatable. This gives downstream consumers confidence that artifacts have
+a known, recoverable provenance.
 
 ## Replay
 
@@ -24,7 +24,7 @@ Given a `run_id`:
 
 Given a `run_id` or `source_hash`:
 1. Mark ledger record `status = invalidated`
-2. Emit invalidation event to downstream subscribers (LightRAG, Hindsight)
+2. Emit invalidation event to downstream subscribers (target stores)
 3. Downstream subscribers responsible for removing/tombstoning affected chunks
 4. Invalidation is non-destructive to the ledger itself — record is kept
 

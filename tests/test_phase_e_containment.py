@@ -9,7 +9,6 @@ These four tests prove the four required properties:
   PASS 4 — Sandbox failure / ephemeral writes do not produce committed artifacts.
 
 Run with:
-    cd EVECOR/services/stele
     uv run pytest tests/test_phase_e_containment.py -v
 """
 from __future__ import annotations
@@ -103,9 +102,9 @@ class TestForbiddenWrites:
         # The fake parser exits 0 only if the write SUCCEEDS (containment failure).
         # Containment pass: exit_code == 1 and no evil file on host.
         assert result.exit_code == 1, (
-            "write to /home/jarvis/ succeeded inside sandbox — containment FAILED"
+            "write to /home/user/ succeeded inside sandbox — containment FAILED"
         )
-        assert not Path("/home/jarvis/stele_evil_write.txt").exists(), (
+        assert not Path("/home/user/stele_evil_write.txt").exists(), (
             "evil file appeared on host — containment FAILED"
         )
         assert "blocked" in result.stdout
@@ -117,7 +116,7 @@ class TestForbiddenWrites:
             script_path=FIXTURES / "parser_write_mnt.py",
         )
         evil_path = Path(
-            "/mnt/jarvis-data/projects/EVECOR/services/stele/stele_evil_write.txt"
+            "/mnt/data/stele_evil_write.txt"
         )
         result = run_in_sandbox(config)
 

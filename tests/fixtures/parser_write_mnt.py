@@ -4,7 +4,7 @@ Expected outcome: write fails (path does not exist in sandbox), exit non-zero.
 """
 import sys
 
-target = "/mnt/jarvis-data/projects/EVECOR/services/stele/stele_evil_write.txt"
+target = "/mnt/data/stele_evil_write.txt"
 try:
     with open(target, "w") as f:
         f.write("this should never reach the host")

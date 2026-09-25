@@ -12,7 +12,6 @@ Seven required proofs:
   PASS 7 — Dispatcher records target write success/failure separately
 
 Run:
-    cd EVECOR/services/stele
     uv run pytest tests/test_phase_h_adapter_contract.py -v
 """
 from __future__ import annotations
@@ -325,7 +324,7 @@ class TestAdapterCannotBypassDispatcher:
         record = _commit_record(store, artifact_dir)
         dispatcher = Dispatcher()  # no writers registered
         result = dispatcher.dispatch(
-            FakeAdapter(), record, HindsightTarget("jarvis")
+            FakeAdapter(), record, HindsightTarget("default")
         )
         assert result.status == "failed"
         assert "no writer" in (result.error or "").lower()

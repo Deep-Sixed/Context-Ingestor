@@ -17,7 +17,7 @@ sufficient to reconstruct or invalidate the downstream state.
 | `run_id` | uuid | Unique identifier for this parse run |
 | `source_path` | str | Original input file path (outside sandbox) |
 | `source_hash` | sha256 | Hash of the input file at ingest time |
-| `parser` | str | Parser name and version (e.g., `raganything:1.3.1`) |
+| `parser` | str | Parser name and version (e.g., `mineru:4.0.7`) |
 | `parser_config` | jsonb | Config/options passed to parser |
 | `artifact_path` | str | Path to output bundle in staging |
 | `artifact_hash` | sha256 | Hash of full output bundle |
@@ -30,17 +30,18 @@ sufficient to reconstruct or invalidate the downstream state.
 
 ## Storage
 
-Ledger lives in a dedicated Postgres schema `stele` on an appropriate DB.
-TBD: whether to co-locate on `graphify-core-db` or a standalone Stele DB.
+The ledger is a SQLite database in WAL mode (`LedgerStore(db_path)`). The
+schema uses only portable types, so it can move to a Postgres schema `stele`
+when a deployment needs a shared, multi-writer ledger.
 
 ## Commit protocol
 
 1. Parser runs inside Phase E sandbox → produces artifact bundle in staging
 2. Ledger record inserted with `status = pending`
 3. Downstream adapter reads artifact from staging via ledger `run_id`
-4. Adapter writes to target (LightRAG, Hindsight, etc.)
+4. Dispatcher writes the adapter's chunks to the target store
 5. On success: ledger record updated to `status = committed`
-6. On failure: ledger record stays `pending`; no partial state in production
+6. On failure: ledger record stays `pending`; the record is never committed
 
 ## Implementation
 

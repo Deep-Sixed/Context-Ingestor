@@ -5,11 +5,12 @@
 
 ## Goal
 
-Parser execution (RAG-ANYTHING, MinerU, Marker) must run inside an isolated
-execution context. Parsers may not:
+Parser execution (MinerU, Marker, Docling, or any other document parser) must
+run inside an isolated execution context. Parsers may not:
 - open arbitrary filesystem paths outside a designated input sandbox
 - make outbound network calls
-- write directly to any Hindsight, Graphify, LightRAG, or MetaRouter target
+- write directly to any downstream store (vector index, knowledge graph,
+  memory service, database)
 - spawn subprocesses without explicit allowlist
 
 ## Mechanism

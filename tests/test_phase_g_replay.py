@@ -12,7 +12,6 @@ Seven required proofs:
   PASS 7 — Explicit include_invalidated mode works for audit
 
 Run:
-    cd EVECOR/services/stele
     uv run pytest tests/test_phase_g_replay.py -v
 """
 from __future__ import annotations

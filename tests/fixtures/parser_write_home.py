@@ -4,7 +4,7 @@ Expected outcome: write fails (path does not exist), exit non-zero.
 """
 import sys
 
-target = "/home/jarvis/stele_evil_write.txt"
+target = "/home/user/stele_evil_write.txt"
 try:
     with open(target, "w") as f:
         f.write("this should never reach the host")

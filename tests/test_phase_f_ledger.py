@@ -11,7 +11,6 @@ Six required proofs:
   PASS 6 — Duplicate artifact hash is idempotent or rejected explicitly
 
 Run:
-    cd EVECOR/services/stele
     uv run pytest tests/test_phase_f_ledger.py -v
 """
 from __future__ import annotations
