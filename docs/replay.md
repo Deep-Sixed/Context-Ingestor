@@ -73,7 +73,7 @@ Five named outcomes, never merged into each other:
 | `REPRODUCED` | Byte-identical output from a deterministic replay. Only parsers whose spec requires a `DETERMINISTIC` backend (Wasm, #7) can produce it. |
 | `EQUIVALENT` | Accepted under the parser's comparison policy. **Not** proof of reproduction, and never reported as `REPRODUCED`, even when the bytes happen to match. |
 | `DIVERGED` | The replay produced complete output and it is outside policy. For a parser without a policy, any byte difference. |
-| `UNREPLAYABLE` | The parser cannot be run as recorded: no parser identity (a migrated pre-#12 record), no spec in the catalog, a missing or different Wasm module or image, a missing input Snapshot, a record the spec cannot build a run from (e.g. no original file name for a parser that reads by suffix), no capable backend, or a non-deterministic parser with no comparison policy. |
+| `UNREPLAYABLE` | The parser cannot be run as recorded: no parser identity (a migrated pre-#12 record), a record made outside a Stele sandbox (`backend = "external"`, see [ledger.md](ledger.md#recording-an-artifact-made-outside-a-sandbox)), no spec in the catalog, a missing or different Wasm module or image, a missing input Snapshot, a record the spec cannot build a run from (e.g. no original file name for a parser that reads by suffix), no capable backend, or a non-deterministic parser with no comparison policy. |
 | `FAILED` | The parser was run as recorded, but the run did not complete (non-zero exit, timeout, resource limit, crash), so no output was compared. It says nothing about the sealed evidence: replay again. |
 
 `DIVERGED` feeds invalidation: `invalidate_diverged(dispatcher, results)`

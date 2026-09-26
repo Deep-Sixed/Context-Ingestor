@@ -22,6 +22,11 @@ class ArtifactState(str, Enum):
     INVALIDATED = "invalidated"  # retroactively withdrawn (see replay/); terminal
 
 
+# The backend recorded for artifacts produced outside a Stele sandbox
+# (stele.ledger.external). No sandbox backend uses this name.
+EXTERNAL_BACKEND = "external"
+
+
 @dataclass(frozen=True)
 class ParserIdentity:
     """Which parser produced a run's artifacts.
