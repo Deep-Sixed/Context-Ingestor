@@ -102,6 +102,12 @@ as the entrypoint of the image, so it must resolve inside the image (e.g.
   with that reason — it is never replaced by another runtime. Register gVisor
   with `runsc install -- --network=none` so it builds no network stack at all;
   CI does this, and some Docker hosts refuse runsc with `--network none` alone.
+  On some hosts gVisor's default platform, `systrap`, hangs: the sandbox
+  starts but the container's first process never runs, and `docker rm -f`
+  cannot remove it (Stele then reports `ContainmentCleanupError`). Check with
+  `runsc --network=none --platform=systrap do /bin/true`. Where it hangs,
+  register `runsc install -- --network=none --platform=ptrace`: slower, the
+  same isolation boundary. CI probes this on every run.
 - **GPU.** `OciBackend(gpu=True)` passes NVIDIA GPUs through with CDI
   (`--device nvidia.com/gpu=all`) or Docker's `--gpus all`, and is unavailable
   ("no usable GPU") when the engine exposes none. gVisor supports GPUs only via

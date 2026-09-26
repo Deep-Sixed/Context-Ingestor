@@ -16,6 +16,10 @@ jobs:
   # /usr/bin/python3 and resolves back to it. Containers use their own image.
   linux-containment:
     runs-on: ubuntu-24.04
+    # A normal run takes about 4 minutes. A container engine that wedges
+    # (seen with gVisor on hosted runners) must fail the job, not hold it
+    # for GitHub's 6-hour default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install containment dependencies
@@ -42,8 +46,19 @@ jobs:
         # only). Parsers never get a network, and Docker's --network none
         # alone is refused by runsc on these runners ("cannot run with
         # network enabled in root network namespace").
+        #
+        # gVisor's default platform, systrap, hangs on some hosts: the
+        # sandbox starts, but the container's first process never runs, and
+        # `docker rm -f` cannot remove it. Which hosted runner a job lands on
+        # decides it, so probe it and fall back to ptrace (slower, same
+        # isolation boundary) where it hangs.
         run: |
-          sudo runsc install -- --network=none
+          PLATFORM=systrap
+          if ! sudo timeout -s KILL 60 runsc --network=none --platform=systrap do /bin/true; then
+            echo "::warning::gVisor's systrap platform hangs on this runner; registering runsc with --platform=ptrace"
+            PLATFORM=ptrace
+          fi
+          sudo runsc install -- --network=none --platform="$PLATFORM"
           sudo systemctl restart docker
           docker info --format '{{json .Runtimes}}' | grep -q runsc
       - name: Fetch the pinned parser image (trusted acquisition step)
@@ -57,7 +72,11 @@ jobs:
         # step even though its output is piped through tee.
         shell: bash
         run: |
-          .venv/bin/python -m pytest tests -q -rs | tee pytest.log
+          # --timeout (pytest-timeout): a test stuck longer than this fails
+          # with its name and every thread's stack, and the run goes on, so a
+          # hang in the container engine names the test that hit it.
+          # --durations lists the slowest tests either way.
+          .venv/bin/python -m pytest tests -q -rs --timeout=120 --durations=15 | tee pytest.log
           # Windows-only tests may skip here, and the GPU variant of the OCI
           # backend skips because hosted runners have no GPU; nothing else may.
           if grep "SKIPPED" pytest.log | grep -v "Windows feature" | grep -qv "no usable GPU"; then
