@@ -232,6 +232,23 @@ def test_retry_after_files_were_removed_still_compares_paths(store, bundle) -> N
         _record(store, bundle, run_id, artifact_paths=[bundle[0] / "OTHER.md"])
 
 
+def test_retry_with_some_files_removed_still_compares_the_rest(store, tmp_path) -> None:
+    """One removed file must not excuse another that changed."""
+    out = tmp_path / "two"
+    out.mkdir()
+    a, b = out / "a.md", out / "b.md"
+    a.write_text("original A", encoding="utf-8")
+    b.write_text("original B", encoding="utf-8")
+    run_id = str(uuid.uuid4())
+    first = _record(store, (out, [a, b]), run_id)
+    a.unlink()
+
+    assert _record(store, (out, [a, b]), run_id) == first   # b unchanged: a retry
+    b.write_text("different B", encoding="utf-8")
+    with pytest.raises(DuplicateRunError, match="the artifacts differ"):
+        _record(store, (out, [a, b]), run_id)
+
+
 def test_sandbox_record_is_not_reused_after_files_were_removed(store, bundle) -> None:
     artifact_dir, paths = bundle
     result = SandboxResult(

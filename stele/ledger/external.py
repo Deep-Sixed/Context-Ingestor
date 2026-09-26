@@ -37,9 +37,9 @@ What the record claims, and what it does not:
 run_id is the caller's idempotency key. Calling again with a run_id the
 ledger already holds, for the same bundle, producer, config, input and
 source, returns the SEALED record (or seals a record an earlier call left
-PENDING). A retry may come after the caller removed its artifact files: the
-bundle is then vouched for by the archive, which sealing already verified,
-and only the artifact paths are compared. Anything else for that run_id
+PENDING). A retry may come after the caller removed some or all of its
+artifact files: those are vouched for by the archive, which sealing already
+verified, and every file still present must hash as recorded. Anything else for that run_id
 raises DuplicateRunError: a run has one record.
 
 External records carry their producer's name like any record, but the
@@ -167,14 +167,13 @@ def _require_same_run(
         if relative != sorted(record.artifact_manifest):
             differences.append("the artifacts differ")
         else:
-            try:
-                manifest = build_manifest(artifact_dir, artifact_paths)
-            except FileNotFoundError:
-                # The caller removed its files after an earlier call; the
-                # archive holds the bundle (sealing verifies it), so the
-                # paths are all there is to compare.
-                manifest = None
-            if manifest is not None and manifest != record.artifact_manifest:
+            # Files the caller removed after an earlier call are vouched for
+            # by the archive (sealing verifies it); every file still present
+            # is compared, so a changed file is never taken for the recorded one.
+            present = [p for p in artifact_paths if Path(p).exists()]
+            manifest = build_manifest(artifact_dir, present)
+            if any(record.artifact_manifest.get(rel) != digest
+                   for rel, digest in manifest.items()):
                 differences.append("the artifacts differ")
     if differences:
         raise DuplicateRunError(

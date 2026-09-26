@@ -158,8 +158,9 @@ assert record.state is ArtifactState.SEALED
 - **`run_id` is the idempotency key.** Calling again for a recorded `run_id`
   with the same bundle, producer, config, input Snapshot and Source returns
   the sealed record, or seals a record an earlier call left `pending`. A
-  retry may come after the caller removed its artifact files: the archive
-  vouches for the bundle, and only the artifact paths are compared. Anything else
+  retry may come after the caller removed some or all of its artifact files:
+  the archive vouches for those, and every file still present must hash as
+  recorded. Anything else
   for that `run_id`, including a record that is `failed`, raises
   `DuplicateRunError`: record it under a new `run_id`.
 - If sealing fails, the record is marked `failed` and the error propagates,
