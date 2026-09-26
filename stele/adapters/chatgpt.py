@@ -55,6 +55,11 @@ class ChatGPTExportAdapter:
 
     def iter_chunks(self, bundle: SealedBundle) -> Iterator[SteleChunk]:
         """Chunks for every conversation, reading one conversation at a time."""
+        if bundle.external:
+            raise MalformedExportError(
+                f"record {bundle.record_id} was recorded outside a Stele sandbox; "
+                f"only {SPLITTER} runs are read as ChatGPT exports"
+            )
         if bundle.parser is not None and bundle.parser.name != SPLITTER:
             raise MalformedExportError(
                 f"expected a {SPLITTER} bundle, got one from {bundle.parser.name}"

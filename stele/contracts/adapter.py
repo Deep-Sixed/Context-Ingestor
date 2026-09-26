@@ -28,7 +28,7 @@ from typing import Any, Mapping, Protocol
 
 from ..archive.records import SnapshotKind, canonical_json
 from ..archive.store import BlobStore
-from ..ledger.models import ArtifactRecord, ParserIdentity
+from ..ledger.models import EXTERNAL_BACKEND, ArtifactRecord, ParserIdentity
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +85,14 @@ class SealedBundle:
     source_kind: SnapshotKind | None
     source_path: str | None      # descriptive locator of the input, not a readable path
     _archive: BlobStore = field(repr=False, compare=False)
+    # The sandbox backend that made the record; EXTERNAL_BACKEND for artifacts
+    # recorded with record_external_artifact, whose producer is asserted.
+    backend: str | None = None
+
+    @property
+    def external(self) -> bool:
+        """True if the bundle was recorded outside a Stele sandbox."""
+        return self.backend == EXTERNAL_BACKEND
 
     @classmethod
     def from_record(cls, record: ArtifactRecord, archive: BlobStore) -> "SealedBundle":
@@ -102,6 +110,7 @@ class SealedBundle:
             source_kind=record.source_kind,
             source_path=record.source_path,
             _archive=archive,
+            backend=record.backend,
         )
 
     def paths(self) -> list[str]:

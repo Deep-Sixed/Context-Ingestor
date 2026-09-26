@@ -20,7 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from stele.archive.records import Snapshot, SnapshotKind
+from stele.adapters import ChatGPTExportAdapter, MalformedExportError
+from stele.archive.records import Snapshot, SnapshotKind, Source
+from stele.contracts.adapter import SealedBundle
+from stele.extraction.normalizers import NormalizeError, normalize
 from stele.containment.result import SandboxResult
 from stele.ledger.events import verify_ledger
 from stele.ledger.external import record_external_artifact
@@ -206,6 +209,89 @@ def test_sandbox_record_is_not_reused(store, bundle) -> None:
 
     with pytest.raises(DuplicateRunError, match="backend 'bubblewrap'"):
         _record(store, bundle, str(result.run_id))
+
+
+def test_retry_after_files_were_removed_returns_sealed_record(store, bundle) -> None:
+    """The first call sealed the record but its answer was lost; the caller
+    cleaned up its files and retries with the same run_id."""
+    run_id = str(uuid.uuid4())
+    first = _record(store, bundle, run_id)
+    for path in bundle[1]:
+        path.unlink()
+
+    assert _record(store, bundle, run_id) == first
+
+
+def test_retry_after_files_were_removed_still_compares_paths(store, bundle) -> None:
+    run_id = str(uuid.uuid4())
+    _record(store, bundle, run_id)
+    for path in bundle[1]:
+        path.unlink()
+
+    with pytest.raises(DuplicateRunError, match="the artifacts differ"):
+        _record(store, bundle, run_id, artifact_paths=[bundle[0] / "OTHER.md"])
+
+
+def test_sandbox_record_is_not_reused_after_files_were_removed(store, bundle) -> None:
+    artifact_dir, paths = bundle
+    result = SandboxResult(
+        run_id=uuid.uuid4(), exit_code=0, stdout=b"", stderr=b"", wall_time_seconds=0.1,
+        timed_out=False, artifact_dir=artifact_dir, artifact_paths=paths, backend="bubblewrap",
+    )
+    with ledger_transaction(store, result, parser=PRODUCER, parser_config=CONFIG):
+        pass
+    for path in paths:
+        path.unlink()
+
+    with pytest.raises(DuplicateRunError, match="backend 'bubblewrap'"):
+        _record(store, bundle, str(result.run_id))
+
+
+def _archived_input(store, data: bytes, kind=SnapshotKind.FILE) -> Snapshot:
+    store.archive.put_bytes(data)
+    return store.archive.put_snapshot(
+        Snapshot(kind, hashlib.sha256(data).hexdigest(), len(data), 1)
+    )
+
+
+def test_retry_with_a_different_source_is_refused(store, bundle) -> None:
+    run_id = str(uuid.uuid4())
+    snapshot = _archived_input(store, b"input document")
+    _record(store, bundle, run_id, input_snapshot=snapshot, source=Source(locator="a.md"))
+
+    with pytest.raises(DuplicateRunError, match="the source differs"):
+        _record(store, bundle, run_id, input_snapshot=snapshot, source=Source(locator="b.md"))
+    with pytest.raises(DuplicateRunError, match="the source differs"):
+        _record(store, bundle, run_id, input_snapshot=snapshot)
+    assert _record(
+        store, bundle, run_id, input_snapshot=snapshot, source=Source(locator="a.md")
+    ).state is ArtifactState.SEALED
+
+
+def test_retry_with_a_different_snapshot_is_refused(store, bundle) -> None:
+    run_id = str(uuid.uuid4())
+    snapshot = _archived_input(store, b"input document")
+    _record(store, bundle, run_id, input_snapshot=snapshot)
+
+    same_digest_other_size = Snapshot(snapshot.kind, snapshot.digest, snapshot.size + 1, 1)
+    with pytest.raises(DuplicateRunError, match="the input differs"):
+        _record(store, bundle, run_id, input_snapshot=same_digest_other_size)
+
+
+# ---------------------------------------------------------------------------
+# An external producer is never read as a sandbox parser
+# ---------------------------------------------------------------------------
+
+def test_external_record_under_a_parser_name_is_not_read_as_that_parser(store, bundle) -> None:
+    impostor = ParserIdentity(name="chatgpt-export-split", version="1")
+    record = _record(store, bundle, producer=impostor, producer_config={})
+    sealed = SealedBundle.from_record(record, store.archive)
+    assert sealed.external
+
+    with pytest.raises(NormalizeError, match="outside a Stele sandbox"):
+        normalize(sealed)
+    with pytest.raises(MalformedExportError, match="outside a Stele sandbox"):
+        ChatGPTExportAdapter().transform(sealed)
 
 
 def test_failed_record_is_not_resumed(store, bundle) -> None:

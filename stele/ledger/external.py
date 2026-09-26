@@ -35,9 +35,17 @@ What the record claims, and what it does not:
     ledger's archive, as for a sandbox run.
 
 run_id is the caller's idempotency key. Calling again with a run_id the
-ledger already holds, for the same bundle, producer, config and input,
-returns the SEALED record (or seals a record an earlier call left PENDING).
-Anything else for that run_id raises DuplicateRunError: a run has one record.
+ledger already holds, for the same bundle, producer, config, input and
+source, returns the SEALED record (or seals a record an earlier call left
+PENDING). A retry may come after the caller removed its artifact files: the
+bundle is then vouched for by the archive, which sealing already verified,
+and only the artifact paths are compared. Anything else for that run_id
+raises DuplicateRunError: a run has one record.
+
+External records carry their producer's name like any record, but the
+parser-specific consumers (extraction normalizers, the ChatGPT adapter)
+refuse them: bytes an application wrote are never read as a sandbox
+parser's output, even under the same name.
 """
 from __future__ import annotations
 
@@ -46,7 +54,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..archive.records import Snapshot, Source
-from .hashing import build_manifest
+from ..archive.store import ArchiveError
+from .hashing import artifact_relative_path, build_manifest
 from .models import EXTERNAL_BACKEND, ArtifactRecord, ArtifactState, ParserIdentity
 from .store import DuplicateRunError, LedgerStore, ProvenanceError, canonical_parser_config
 from .transaction import _fail_quietly, _state_or_none
@@ -102,7 +111,8 @@ def record_external_artifact(
             return _seal(store, record)
 
     _require_same_run(
-        existing, artifact_dir, artifact_paths, producer, producer_config, input_snapshot,
+        store, existing, artifact_dir, artifact_paths, producer, producer_config,
+        input_snapshot, source,
     )
     if existing.state is ArtifactState.SEALED:
         return existing
@@ -122,14 +132,21 @@ def _run_id(run_id: str | uuid.UUID) -> str:
 
 
 def _require_same_run(
+    store: LedgerStore,
     record: ArtifactRecord,
     artifact_dir: Path,
     artifact_paths: list[Path],
     producer: ParserIdentity,
     producer_config: Mapping[str, Any],
     input_snapshot: Snapshot | None,
+    source: Source | None,
 ) -> None:
-    """Raise DuplicateRunError unless this call describes the recorded run."""
+    """Raise DuplicateRunError unless this call describes the recorded run.
+
+    Everything that does not need the caller's files is compared first, so a
+    run_id that belongs to another record is reported as such even when the
+    files are gone.
+    """
     differences = []
     if record.backend != EXTERNAL_BACKEND:
         differences.append(f"it was recorded by backend {record.backend!r}")
@@ -139,15 +156,44 @@ def _require_same_run(
         producer_config
     ):
         differences.append("the producer config differs")
-    if record.source_hash != (input_snapshot.digest if input_snapshot is not None else None):
+    if not _same_input(store, record, input_snapshot):
         differences.append("the input differs")
-    if build_manifest(artifact_dir, artifact_paths) != record.artifact_manifest:
-        differences.append("the artifacts differ")
+    if record.source_id != (source.source_id if source is not None else None):
+        differences.append("the source differs")
+    if not differences:
+        relative = sorted(
+            artifact_relative_path(artifact_dir, p).as_posix() for p in artifact_paths
+        )
+        if relative != sorted(record.artifact_manifest):
+            differences.append("the artifacts differ")
+        else:
+            try:
+                manifest = build_manifest(artifact_dir, artifact_paths)
+            except FileNotFoundError:
+                # The caller removed its files after an earlier call; the
+                # archive holds the bundle (sealing verifies it), so the
+                # paths are all there is to compare.
+                manifest = None
+            if manifest is not None and manifest != record.artifact_manifest:
+                differences.append("the artifacts differ")
     if differences:
         raise DuplicateRunError(
             f"run {record.run_id} already has record {record.record_id}, and "
             + "; ".join(differences)
         )
+
+
+def _same_input(store: LedgerStore, record: ArtifactRecord, snapshot: Snapshot | None) -> bool:
+    """True if snapshot is the record's input: same digest and kind, and the
+    same Snapshot the archive holds."""
+    if snapshot is None:
+        return record.source_hash is None
+    if (record.source_hash, record.source_kind) != (snapshot.digest, snapshot.kind):
+        return False
+    try:
+        return store.archive.get_snapshot(snapshot.digest, snapshot.kind) == snapshot
+    except ArchiveError:
+        return False
 
 
 def _seal(store: LedgerStore, record: ArtifactRecord) -> ArtifactRecord:

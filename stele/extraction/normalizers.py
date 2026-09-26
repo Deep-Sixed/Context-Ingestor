@@ -55,6 +55,13 @@ def normalize(bundle: SealedBundle) -> Extraction:
 
 def normalizer_for(bundle: SealedBundle) -> Callable[[SealedBundle], Extraction]:
     name = bundle.parser.name if bundle.parser is not None else None
+    if bundle.external:
+        # A normalizer reads a sandbox parser's output format; an external
+        # producer's name is asserted, not measured, so it selects nothing.
+        raise NormalizeError(
+            f"record {bundle.record_id} was recorded outside a Stele sandbox "
+            f"(producer {name!r}); parser normalizers apply only to sandbox runs"
+        )
     if name in MARKDOWN_PARSERS:
         return normalize_markdown
     if name == SPLITTER:

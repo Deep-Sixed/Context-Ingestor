@@ -147,11 +147,19 @@ assert record.state is ArtifactState.SEALED
   since those are measured by a sandbox run (`ProvenanceError`).
 - **Never replayed.** There is no parser run to repeat, so replay reports
   these records `UNREPLAYABLE` and never invalidates them.
+- **Never read as a sandbox parser.** An external record keeps its
+  producer's name, but the parser-specific consumers refuse it: the
+  extraction normalizers (`NormalizeError`) and `ChatGPTExportAdapter`
+  (`MalformedExportError`). A producer named like a sandbox parser can't
+  pass its bytes off as that parser's output. `SealedBundle.backend` and
+  `SealedBundle.external` let other adapters make the same check.
 - **Input is optional.** An `input_snapshot` must already be in the ledger's
   archive (`ProvenanceError` otherwise).
 - **`run_id` is the idempotency key.** Calling again for a recorded `run_id`
-  with the same bundle, producer, config and input returns the sealed
-  record, or seals a record an earlier call left `pending`. Anything else
+  with the same bundle, producer, config, input Snapshot and Source returns
+  the sealed record, or seals a record an earlier call left `pending`. A
+  retry may come after the caller removed its artifact files: the archive
+  vouches for the bundle, and only the artifact paths are compared. Anything else
   for that `run_id`, including a record that is `failed`, raises
   `DuplicateRunError`: record it under a new `run_id`.
 - If sealing fails, the record is marked `failed` and the error propagates,
