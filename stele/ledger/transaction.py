@@ -87,6 +87,61 @@ def _check_input(sandbox_result: SandboxResult) -> None:
         )
 
 
+# RunConditions field → the key under which a backend reports the limit it
+# applied (ExecutionOutcome.limits, carried as SandboxResult.telemetry.limits).
+_APPLIED_LIMITS = {
+    "memory": "memory",
+    "cpus": "cpus",
+    "pids_limit": "pids",
+    "timeout_seconds": "timeout_seconds",
+}
+
+
+def _check_run_conditions(
+    sandbox_result: SandboxResult, run_conditions: RunConditions | None
+) -> None:
+    """Refuse run conditions the backend does not confirm it applied.
+
+    A replay runs the parser under the recorded conditions, so they must be
+    what the run executed under, not what a caller says it did. Every stated
+    condition is compared with the limits the backend reported; one it did
+    not report cannot be vouched for and is refused too.
+    """
+    if run_conditions is None:
+        return
+    telemetry = sandbox_result.telemetry
+    applied = dict(telemetry.limits) if telemetry is not None else {}
+    problems: list[str] = []
+
+    if "gpu" in applied:
+        ran_on = "gpu" if applied["gpu"] else "cpu"
+        if ran_on != run_conditions.device:
+            problems.append(f"device {run_conditions.device!r}, but the run used the {ran_on}")
+    elif run_conditions.device == "gpu":
+        problems.append("device 'gpu', but the backend reports no GPU")
+
+    for field_name, key in _APPLIED_LIMITS.items():
+        stated = getattr(run_conditions, field_name)
+        if stated is None:
+            continue
+        if key not in applied:
+            problems.append(f"{field_name}={stated!r}, which the backend does not report applying")
+        elif not _same_limit(stated, applied[key]):
+            problems.append(f"{field_name}={stated!r}, but the backend applied {applied[key]!r}")
+
+    if problems:
+        raise ProvenanceError(
+            f"run_id={sandbox_result.run_id}: the stated run conditions are not the ones "
+            "the run executed under: " + "; ".join(problems)
+        )
+
+
+def _same_limit(stated: Any, applied: Any) -> bool:
+    if isinstance(stated, float) and isinstance(applied, (int, float)) and not isinstance(applied, bool):
+        return float(applied) == stated
+    return type(stated) is type(applied) and stated == applied
+
+
 @contextmanager
 def ledger_transaction(
     store: LedgerStore,
@@ -113,7 +168,10 @@ def ledger_transaction(
 
     run_conditions is the device and limits Stele's runner applied to the
     run (stele.parsers.replay.record_parser_run passes them from the
-    ParserRun); a replay uses them to run the parser the same way.
+    ParserRun); a replay uses them to run the parser the same way. Each one
+    must match the limits the backend reported applying
+    (sandbox_result.telemetry.limits), or ProvenanceError is raised and
+    nothing is recorded.
 
     Yields the ArtifactRecord in PENDING state.
     """
@@ -137,6 +195,7 @@ def ledger_transaction(
             "stele.ledger.external.record_external_artifact"
         )
     _check_input(sandbox_result)
+    _check_run_conditions(sandbox_result, run_conditions)
     identity = measured_parser_identity(parser, sandbox_result)
 
     record = store.create_pending(
